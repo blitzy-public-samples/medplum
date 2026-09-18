@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import { notifications } from '@mantine/notifications';
 import { MockClient } from '@medplum/mock';
-import { act, renderAppRoutes, screen } from '../test-utils/render';
+import { MedplumProvider } from '@medplum/react';
+import type { DataRouter } from 'react-router';
+import { createMemoryRouter, RouterProvider } from 'react-router';
+import { AppRoutes } from '../AppRoutes';
+import { act, render, renderAppRoutes, screen } from '../test-utils/render';
 
 type OAuthClientLintStatus = 'pass' | 'warning' | 'fail';
 
@@ -41,7 +45,13 @@ const OCS_002_REASON =
 const OCS_002_REMEDIATION =
   'Replace the wildcard entry with one exact, fully qualified URL for each callback the application actually uses.';
 
-const CLIENT_ID = 'client-1';
+const OCS_004_REASON =
+  "A value belonging to this client also matches the server's built-in Medplum CLI client, which POST /oauth2/register serves without authentication: a caller presenting a matching redirect URI receives that built-in client's id and redirect URI list rather than this client's. No client secret is returned by that endpoint.";
+
+const OCS_004_REMEDIATION =
+  'The built-in client cannot be removed by configuration. Register a redirect URI that does not collide with it — the built-in client uses the loopback URI http://localhost:9615 — and give this client an id of its own.';
+
+const CLIENT_ID = '9f8c1d4e-3b2a-4c5d-8e7f-1a2b3c4d5e6f';
 const BARE_ORIGIN_URI = 'https://app.example.com';
 const WILDCARD_URI = 'https://app.example.com/*';
 const EXACT_URI = 'https://app.example.com/oauth/callback';
@@ -69,6 +79,30 @@ async function setup(url = '/admin/oauth-security/' + CLIENT_ID): Promise<void> 
   await act(async () => {
     renderAppRoutes(medplum, url);
   });
+}
+
+const FIRST_CLIENT_ID = '5f6f9b2e-4a1c-4d5b-9e2f-0a1b2c3d4e5f';
+const SECOND_CLIENT_ID = '7c8d9e0f-1a2b-4c3d-8e9f-0a1b2c3d4e60';
+const DEEP_LINK_CLIENT_ID = '2d3e4f50-6a7b-4c8d-9e0f-1a2b3c4d5e6f';
+
+/**
+ * Renders the application routes at the detail view for one OAuth client and returns the router.
+ * @param url - The URL to render.
+ * @returns The router the application routes are rendered with.
+ */
+async function setupWithRouter(url: string): Promise<DataRouter> {
+  const router = createMemoryRouter([{ path: '*', element: <AppRoutes /> }], {
+    initialEntries: [url],
+    initialIndex: 0,
+  });
+  await act(async () => {
+    render(
+      <MedplumProvider medplum={medplum} navigate={router.navigate}>
+        <RouterProvider router={router} />
+      </MedplumProvider>
+    );
+  });
+  return router;
 }
 
 describe('OAuthClientSecurityDetailPage', () => {
@@ -148,6 +182,60 @@ describe('OAuthClientSecurityDetailPage', () => {
     });
   });
 
+  test('Orders the findings by rule id rather than by the order the report returned them', async () => {
+    await setup();
+
+    expect(await screen.findByText('OCS-001')).toBeInTheDocument();
+    expect(screen.getAllByRole('alert')).toHaveLength(2);
+    expect(screen.getAllByText(/^OCS-\d{3}$/).map((title) => title.textContent)).toStrictEqual(['OCS-001', 'OCS-002']);
+  });
+
+  test('Falls back to the client id when the report carries no client name', async () => {
+    lintReport = async () =>
+      report({
+        id: CLIENT_ID,
+        redirectUris: [EXACT_URI],
+        status: 'pass',
+        findings: [],
+      });
+
+    await setup();
+
+    expect(await screen.findByRole('heading', { name: CLIENT_ID })).toBeInTheDocument();
+    expect(screen.getByText('pass')).toBeInTheDocument();
+    expect(screen.getByText('No risky patterns detected.')).toBeInTheDocument();
+  });
+
+  test('Renders a finding that names no redirect URI', async () => {
+    lintReport = async () =>
+      report({
+        id: CLIENT_ID,
+        name: 'Collision Client',
+        redirectUris: [EXACT_URI],
+        status: 'warning',
+        findings: [
+          {
+            ruleId: 'OCS-004',
+            status: 'warning',
+            reason: OCS_004_REASON,
+            remediation: OCS_004_REMEDIATION,
+          },
+        ],
+      });
+
+    await setup();
+
+    expect(await screen.findByText('OCS-004')).toBeInTheDocument();
+    expect(screen.getByText(OCS_004_REASON)).toBeInTheDocument();
+    expect(screen.getByText(OCS_004_REMEDIATION)).toBeInTheDocument();
+    expect(screen.getByText('Suggested fix:')).toBeInTheDocument();
+    expect(screen.getByText('warning')).toBeInTheDocument();
+    expect(screen.queryByText(EXACT_URI)).not.toBeInTheDocument();
+    expect(screen.getByRole('alert').textContent).toBe(
+      'OCS-004' + OCS_004_REASON + 'Suggested fix: ' + OCS_004_REMEDIATION
+    );
+  });
+
   test('Shows no risky patterns detected for a client with no findings', async () => {
     lintReport = async () =>
       report({
@@ -184,5 +272,105 @@ describe('OAuthClientSecurityDetailPage', () => {
     expect(await screen.findByText(ERROR_MESSAGE)).toBeInTheDocument();
     expect(screen.getByText('Back to OAuth Security')).toBeInTheDocument();
     expect(document.querySelector('.mantine-Loader-root')).toBeNull();
+  });
+
+  test('Clears the previous client report when the client id changes', async () => {
+    lintReport = async () =>
+      report({
+        id: FIRST_CLIENT_ID,
+        name: 'First Client',
+        redirectUris: [BARE_ORIGIN_URI],
+        status: 'warning',
+        findings: [
+          {
+            ruleId: 'OCS-001',
+            status: 'warning',
+            redirectUri: BARE_ORIGIN_URI,
+            reason: OCS_001_REASON,
+            remediation: OCS_001_REMEDIATION,
+          },
+        ],
+      });
+
+    const router = await setupWithRouter('/admin/oauth-security/' + FIRST_CLIENT_ID);
+
+    expect(await screen.findByText('First Client')).toBeInTheDocument();
+    expect(screen.getByText(OCS_001_REASON)).toBeInTheDocument();
+
+    let resolveSecond: (value: OAuthClientLintReport) => void = () => undefined;
+    const pending = new Promise<OAuthClientLintReport>((resolve) => {
+      resolveSecond = resolve;
+    });
+    lintReport = () => pending;
+
+    await act(async () => {
+      await router.navigate('/admin/oauth-security/' + SECOND_CLIENT_ID);
+    });
+
+    expect(screen.queryByText('First Client')).not.toBeInTheDocument();
+    expect(screen.queryByText(OCS_001_REASON)).not.toBeInTheDocument();
+    expect(document.querySelector('.mantine-Loader-root')).not.toBeNull();
+
+    await act(async () => {
+      resolveSecond(
+        report({
+          id: SECOND_CLIENT_ID,
+          name: 'Second Client',
+          redirectUris: [WILDCARD_URI],
+          status: 'fail',
+          findings: [
+            {
+              ruleId: 'OCS-002',
+              status: 'fail',
+              redirectUri: WILDCARD_URI,
+              reason: OCS_002_REASON,
+              remediation: OCS_002_REMEDIATION,
+            },
+          ],
+        })
+      );
+      await pending;
+    });
+
+    expect(await screen.findByText('Second Client')).toBeInTheDocument();
+    expect(screen.getByText(OCS_002_REASON)).toBeInTheDocument();
+    expect(medplum.get).toHaveBeenCalledWith('admin/projects/123/oauth-security?_id=' + SECOND_CLIENT_ID, {
+      cache: 'no-cache',
+    });
+  });
+
+  test('Renders the detail view and the admin OAuth Security tab link on a direct deep link', async () => {
+    lintReport = async () =>
+      report({
+        id: DEEP_LINK_CLIENT_ID,
+        name: 'Deep Link Client',
+        redirectUris: [WILDCARD_URI],
+        status: 'fail',
+        findings: [
+          {
+            ruleId: 'OCS-002',
+            status: 'fail',
+            redirectUri: WILDCARD_URI,
+            reason: OCS_002_REASON,
+            remediation: OCS_002_REMEDIATION,
+          },
+        ],
+      });
+
+    const deepLinkUrl = '/admin/oauth-security/' + DEEP_LINK_CLIENT_ID;
+    const previousUrl = window.location.href;
+    window.history.replaceState({}, '', deepLinkUrl);
+
+    try {
+      await setup(deepLinkUrl);
+
+      expect(await screen.findByText('Deep Link Client')).toBeInTheDocument();
+      expect(screen.getByText('OCS-002')).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: 'OAuth Security' })).toHaveAttribute('href', '/admin/oauth-security');
+      expect(screen.getByRole('tab', { name: 'OAuth Security' })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('tab', { name: 'Details' })).toHaveAttribute('aria-selected', 'false');
+    } finally {
+      window.history.replaceState({}, '', previousUrl);
+    }
   });
 });

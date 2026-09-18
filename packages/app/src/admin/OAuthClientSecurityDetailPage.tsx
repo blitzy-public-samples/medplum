@@ -34,6 +34,13 @@ interface OAuthClientLintReport {
   readonly results: OAuthClientLintResult[];
 }
 
+interface OAuthClientLintRequestState {
+  readonly key: string;
+  readonly loading: boolean;
+  readonly result?: OAuthClientLintResult;
+  readonly outcome?: OperationOutcome;
+}
+
 const LIST_PATH = '/admin/oauth-security';
 
 const BADGE_COLORS = {
@@ -47,6 +54,16 @@ const ALERT_COLORS = {
   warning: 'yellow',
   fail: 'red',
 } as const;
+
+/**
+ * Builds the identity of one report request from both of its inputs.
+ * @param projectId - The project the report is requested for.
+ * @param clientId - The OAuth client the report is requested for.
+ * @returns The request key.
+ */
+function getRequestKey(projectId: string, clientId: string): string {
+  return projectId + '/' + clientId;
+}
 
 function BackLink(): JSX.Element {
   return <MedplumLink to={LIST_PATH}>Back to OAuth Security</MedplumLink>;
@@ -78,29 +95,22 @@ export function OAuthClientSecurityDetailPage(): JSX.Element {
   const medplum = useMedplum();
   const { clientId } = useParams() as { clientId: string };
   const projectId = getProjectId(medplum);
-  const [loading, setLoading] = useState(true);
-  const [result, setResult] = useState<OAuthClientLintResult | undefined>();
-  const [outcome, setOutcome] = useState<OperationOutcome | undefined>();
+  const requestKey = getRequestKey(projectId, clientId);
+  const [state, setState] = useState<OAuthClientLintRequestState>({ key: requestKey, loading: true });
 
   useEffect(() => {
     let active = true;
+    const key = getRequestKey(projectId, clientId);
     medplum
       .get('admin/projects/' + projectId + '/oauth-security?_id=' + clientId, { cache: 'no-cache' })
       .then((report: OAuthClientLintReport) => {
         if (active) {
-          setOutcome(undefined);
-          setResult(report?.results?.[0]);
+          setState({ key, loading: false, result: report?.results?.[0] });
         }
       })
       .catch((err: unknown) => {
         if (active) {
-          setResult(undefined);
-          setOutcome(normalizeOperationOutcome(err));
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setLoading(false);
+          setState({ key, loading: false, outcome: normalizeOperationOutcome(err) });
         }
       });
     return () => {
@@ -108,19 +118,20 @@ export function OAuthClientSecurityDetailPage(): JSX.Element {
     };
   }, [medplum, projectId, clientId]);
 
-  if (loading) {
+  if (state.loading || state.key !== requestKey) {
     return <Loading />;
   }
 
-  if (outcome) {
+  if (state.outcome) {
     return (
       <>
         <BackLink />
-        <OperationOutcomeAlert outcome={outcome} mt="md" />
+        <OperationOutcomeAlert outcome={state.outcome} mt="md" />
       </>
     );
   }
 
+  const result = state.result;
   if (!result) {
     return (
       <>

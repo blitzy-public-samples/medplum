@@ -84,7 +84,7 @@ const registrationCases: {
     expectedRemediation: BUILT_IN_DISCOVERABLE_REMEDIATION,
   },
   {
-    name: 'a configured client whose URI list came from the deprecated singular field',
+    name: 'a configured client matched by its redirect URI rather than by its id',
     clientId: TEST_CLIENT_ID,
     redirectUris: ['https://legacy.example.com/callback'],
     entries: [{ id: 'legacy-config-client', redirectUris: ['https://legacy.example.com/callback'], source: 'config' }],

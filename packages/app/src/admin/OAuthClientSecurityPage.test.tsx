@@ -5,11 +5,12 @@ import type { WithId } from '@medplum/core';
 import { DEFAULT_SEARCH_COUNT } from '@medplum/core';
 import type { ClientApplication } from '@medplum/fhirtypes';
 import { MockClient } from '@medplum/mock';
-import type { MockInstance } from 'vitest';
 import { act, fireEvent, renderAppRoutes, screen, waitFor } from '../test-utils/render';
 
 const PROJECT_ID = '123';
 const EM_DASH = '—';
+const SKELETON_SELECTOR = '.mantine-Skeleton-root';
+const NAME_COLUMN_INDEX = 0;
 const REDIRECT_URI_COLUMN_INDEX = 1;
 const SECURITY_COLUMN_INDEX = 2;
 
@@ -59,11 +60,10 @@ const medplum = new MockClient();
 const originalGet = medplum.get.bind(medplum);
 
 const clients: WithId<ClientApplication>[] = [];
-const clientNames: string[] = [];
 const statusById = new Map<string, LintStatus>();
+const idByName = new Map<string, string>();
 
 let lintResponder: (url: string) => Promise<LintReport>;
-let getSpy: MockInstance;
 
 /**
  * Creates a promise whose settlement is controlled by the caller.
@@ -93,8 +93,21 @@ async function seedClient(name: string, status: LintStatus, config: Partial<Clie
     meta: { project: PROJECT_ID },
   });
   clients.push(created);
-  clientNames.push(name);
   statusById.set(created.id, status);
+  idByName.set(name, created.id);
+}
+
+/**
+ * Returns the id of the seeded client with the given name.
+ * @param name - The client name.
+ * @returns The seeded client id.
+ */
+function idFor(name: string): string {
+  const id = idByName.get(name);
+  if (!id) {
+    throw new Error(`No seeded client named "${name}"`);
+  }
+  return id;
 }
 
 /**
@@ -132,10 +145,41 @@ function buildResult(id: string, status: LintStatus): LintResult {
 
 /**
  * Returns the security report request URLs issued so far.
+ * @param client - The client whose `get` calls are inspected.
  * @returns The request URLs, in call order.
  */
-function lintCallUrls(): string[] {
-  return getSpy.mock.calls.map((call) => String(call[0])).filter((url) => url.includes('/oauth-security'));
+function lintCallUrls(client: MockClient = medplum): string[] {
+  return vi
+    .mocked(client.get)
+    .mock.calls.map((call) => String(call[0]))
+    .filter((url) => url.includes('/oauth-security'));
+}
+
+/**
+ * Returns the table row holding the given client name.
+ * @param name - The client name.
+ * @returns The table row element.
+ */
+function getRow(name: string): HTMLTableRowElement {
+  const row = screen.getByText(name).closest('tr');
+  if (!row) {
+    throw new Error(`No table row found for "${name}"`);
+  }
+  return row;
+}
+
+/**
+ * Returns one cell of the table row holding the given client name.
+ * @param name - The client name.
+ * @param columnIndex - The zero-based column index.
+ * @returns The cell element.
+ */
+function getCell(name: string, columnIndex: number): HTMLTableCellElement {
+  const cell = getRow(name).querySelectorAll('td')[columnIndex];
+  if (!cell) {
+    throw new Error(`No column ${columnIndex} found for "${name}"`);
+  }
+  return cell;
 }
 
 /**
@@ -145,11 +189,7 @@ function lintCallUrls(): string[] {
  * @returns The cell text, which is empty while a skeleton placeholder is rendered.
  */
 function getCellText(name: string, columnIndex: number): string {
-  const row = screen.getByText(name).closest('tr');
-  if (!row) {
-    throw new Error(`No table row found for "${name}"`);
-  }
-  return row.querySelectorAll('td')[columnIndex]?.textContent ?? '';
+  return getCell(name, columnIndex).textContent ?? '';
 }
 
 function getSecurityCellText(name: string): string {
@@ -160,16 +200,40 @@ function getRedirectUriCellText(name: string): string {
   return getCellText(name, REDIRECT_URI_COLUMN_INDEX);
 }
 
-function firstPageIds(): string[] {
-  return clients.slice(0, DEFAULT_SEARCH_COUNT).map((client) => client.id);
+/**
+ * Returns the client names of the rows the table currently renders.
+ * @returns The rendered client names, in row order.
+ */
+function renderedClientNames(): string[] {
+  return screen
+    .getAllByTestId('search-control-row')
+    .map((row) => row.querySelectorAll('td')[NAME_COLUMN_INDEX]?.textContent ?? '');
 }
 
-function secondPageIds(): string[] {
-  return clients.slice(DEFAULT_SEARCH_COUNT).map((client) => client.id);
+/**
+ * Returns the client ids of the rows the table currently renders.
+ * @returns The rendered client ids, in row order.
+ */
+function renderedClientIds(): string[] {
+  return renderedClientNames().map(idFor);
 }
 
-function secondPageNames(): string[] {
-  return clientNames.slice(DEFAULT_SEARCH_COUNT);
+/**
+ * Returns the number of skeleton placeholders currently rendered.
+ * @returns The skeleton count.
+ */
+function skeletonCount(): number {
+  return document.querySelectorAll(SKELETON_SELECTOR).length;
+}
+
+/**
+ * Asserts that two collections of client ids hold the same ids, whatever their order.
+ * @param actual - The ids to check.
+ * @param expected - The ids the collection must hold.
+ */
+function expectSameIds(actual: string[], expected: string[]): void {
+  const sort = (ids: string[]): string[] => [...ids].sort((a, b) => a.localeCompare(b));
+  expect(sort(actual)).toStrictEqual(sort(expected));
 }
 
 async function setup(url = '/admin/oauth-security'): Promise<void> {
@@ -203,11 +267,9 @@ describe('OAuthClientSecurityPage', () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     lintResponder = (url) => Promise.resolve(buildReport(getRequestedIds(url)));
-    getSpy = vi
-      .spyOn(medplum, 'get')
-      .mockImplementation((url, options) =>
-        url.toString().includes('/oauth-security') ? (lintResponder(url.toString()) as any) : originalGet(url, options)
-      );
+    vi.spyOn(medplum, 'get').mockImplementation((url, options) =>
+      url.toString().includes('/oauth-security') ? (lintResponder(url.toString()) as any) : originalGet(url, options)
+    );
     vi.spyOn(medplum, 'isProjectAdmin').mockImplementation(() => true);
     vi.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => false);
   });
@@ -238,7 +300,9 @@ describe('OAuthClientSecurityPage', () => {
     expect(getSecurityCellText(LEGACY_CLIENT_NAME)).toBe('warning');
     expect(getRedirectUriCellText(LEGACY_CLIENT_NAME)).toBe(LEGACY_REDIRECT_URI);
     expect(getRedirectUriCellText(NO_URI_CLIENT_NAME)).toBe(EM_DASH);
-    expect(getRequestedIds(lintCallUrls()[0])).toStrictEqual(firstPageIds());
+    expectSameIds(getRequestedIds(lintCallUrls()[0]), renderedClientIds());
+    expect(medplum.get).toHaveBeenCalledWith(lintCallUrls()[0], { cache: 'no-cache' });
+    expect(skeletonCount()).toBe(0);
   });
 
   test('Shows the OAuth Security tab in the admin navigation', async () => {
@@ -248,6 +312,68 @@ describe('OAuthClientSecurityPage', () => {
     expect(screen.getByRole('link', { name: 'OAuth Security' })).toHaveAttribute('href', '/admin/oauth-security');
   });
 
+  test('Clicking a row opens the security detail view for that client', async () => {
+    await setup();
+
+    await waitFor(() => {
+      expect(getSecurityCellText(WILDCARD_CLIENT_NAME)).toBe('fail');
+    });
+
+    await act(async () => {
+      fireEvent.click(getRow(WILDCARD_CLIENT_NAME));
+    });
+
+    expect(await screen.findByRole('heading', { name: WILDCARD_CLIENT_NAME })).toBeInTheDocument();
+    expect(screen.getByText('Back to OAuth Security')).toBeInTheDocument();
+    expect(lintCallUrls()[1]).toContain('_id=' + idFor(WILDCARD_CLIENT_NAME));
+  });
+
+  test('Auxiliary-clicking a row opens the security detail view for that client', async () => {
+    await setup();
+
+    await waitFor(() => {
+      expect(getSecurityCellText(LEGACY_CLIENT_NAME)).toBe('warning');
+    });
+
+    await act(async () => {
+      fireEvent.click(getRow(LEGACY_CLIENT_NAME), { ctrlKey: true });
+    });
+
+    expect(await screen.findByRole('heading', { name: LEGACY_CLIENT_NAME })).toBeInTheDocument();
+    expect(screen.getByText('Back to OAuth Security')).toBeInTheDocument();
+    expect(lintCallUrls()[1]).toContain('_id=' + idFor(LEGACY_CLIENT_NAME));
+  });
+
+  test('Requests no security report when the project has no OAuth clients', async () => {
+    const emptyMedplum = new MockClient();
+    emptyMedplum.setActiveLoginOverride({
+      accessToken: '123',
+      refreshToken: '456',
+      profile: {
+        reference: 'Practitioner/124',
+      },
+      project: {
+        reference: `Project/${PROJECT_ID}`,
+      },
+    });
+    const emptyOriginalGet = emptyMedplum.get.bind(emptyMedplum);
+    vi.spyOn(emptyMedplum, 'get').mockImplementation((url, options) =>
+      url.toString().includes('/oauth-security')
+        ? (lintResponder(url.toString()) as any)
+        : emptyOriginalGet(url, options)
+    );
+    vi.spyOn(emptyMedplum, 'isProjectAdmin').mockImplementation(() => true);
+    vi.spyOn(emptyMedplum, 'isSuperAdmin').mockImplementation(() => false);
+
+    renderAppRoutes(emptyMedplum, '/admin/oauth-security');
+
+    expect(await screen.findByText('No results')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'OAuth Client Security' })).toBeInTheDocument();
+    expect(screen.getByText('Security')).toBeInTheDocument();
+    expect(lintCallUrls(emptyMedplum)).toHaveLength(0);
+    expect(skeletonCount()).toBe(0);
+  });
+
   test('Advancing the pagination control requests the security status of the next page', async () => {
     await setup();
 
@@ -255,7 +381,9 @@ describe('OAuthClientSecurityPage', () => {
       expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('pass');
     });
     expect(lintCallUrls()).toHaveLength(1);
-    expect(getRequestedIds(lintCallUrls()[0])).toStrictEqual(firstPageIds());
+    const firstPageRequestIds = getRequestedIds(lintCallUrls()[0]);
+    expect(firstPageRequestIds).toHaveLength(DEFAULT_SEARCH_COUNT);
+    expectSameIds(firstPageRequestIds, renderedClientIds());
 
     expect(await screen.findByLabelText('Next page')).toBeInTheDocument();
     await act(async () => {
@@ -265,17 +393,22 @@ describe('OAuthClientSecurityPage', () => {
     await waitFor(() => {
       expect(lintCallUrls()).toHaveLength(2);
     });
+    await waitFor(() => {
+      expect(renderedClientNames()).toHaveLength(SECOND_PAGE_CLIENT_COUNT);
+    });
 
-    expect(getRequestedIds(lintCallUrls()[1])).toStrictEqual(secondPageIds());
-    expect(getRequestedIds(lintCallUrls()[1])).not.toStrictEqual(firstPageIds());
+    const secondPageRequestIds = getRequestedIds(lintCallUrls()[1]);
+    expectSameIds(secondPageRequestIds, renderedClientIds());
+    expect(secondPageRequestIds.filter((id) => firstPageRequestIds.includes(id))).toStrictEqual([]);
 
-    const nextPageNames = secondPageNames();
+    const nextPageNames = renderedClientNames();
     await waitFor(() => {
       expect(getSecurityCellText(nextPageNames[0])).toBe('pass');
     });
     for (const name of nextPageNames) {
       expect(getSecurityCellText(name)).toBe('pass');
     }
+    expect(skeletonCount()).toBe(0);
     expect(screen.queryByText(EXACT_CLIENT_NAME)).not.toBeInTheDocument();
   });
 
@@ -293,6 +426,7 @@ describe('OAuthClientSecurityPage', () => {
       await waitFor(() => {
         expect(lintCallUrls()).toHaveLength(1);
       });
+      const firstPageRequestIds = getRequestedIds(lintCallUrls()[0]);
 
       expect(await screen.findByLabelText('Next page')).toBeInTheDocument();
       await act(async () => {
@@ -302,10 +436,13 @@ describe('OAuthClientSecurityPage', () => {
       await waitFor(() => {
         expect(lintCallUrls()).toHaveLength(2);
       });
+      await waitFor(() => {
+        expect(renderedClientNames()).toHaveLength(SECOND_PAGE_CLIENT_COUNT);
+      });
 
-      const nextPageNames = secondPageNames();
+      const nextPageNames = renderedClientNames();
       await act(async () => {
-        deferreds[1].resolve(buildReport(secondPageIds(), 'warning'));
+        deferreds[1].resolve(buildReport(getRequestedIds(lintCallUrls()[1]), 'warning'));
       });
 
       await waitFor(() => {
@@ -313,16 +450,17 @@ describe('OAuthClientSecurityPage', () => {
       });
 
       await act(async () => {
-        deferreds[0].resolve(buildReport(firstPageIds()));
+        deferreds[0].resolve(buildReport(firstPageRequestIds));
       });
 
       for (const name of nextPageNames) {
         expect(getSecurityCellText(name)).toBe('warning');
       }
+      expect(skeletonCount()).toBe(0);
     });
 
     test('A security response that omits a client settles that row to the empty placeholder', async () => {
-      const omittedId = clients[0].id;
+      const omittedId = idFor(EXACT_CLIENT_NAME);
       const deferred = createDeferred<LintReport>();
       lintResponder = () => deferred.promise;
 
@@ -332,8 +470,9 @@ describe('OAuthClientSecurityPage', () => {
         expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('');
       });
 
+      const requestedIds = getRequestedIds(lintCallUrls()[0]);
       await act(async () => {
-        deferred.resolve(buildReport(firstPageIds().filter((id) => id !== omittedId)));
+        deferred.resolve(buildReport(requestedIds.filter((id) => id !== omittedId)));
       });
 
       await waitFor(() => {
@@ -341,6 +480,8 @@ describe('OAuthClientSecurityPage', () => {
       });
 
       expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe(EM_DASH);
+      expect(getCell(EXACT_CLIENT_NAME, SECURITY_COLUMN_INDEX).querySelector(SKELETON_SELECTOR)).toBeNull();
+      expect(skeletonCount()).toBe(0);
     });
 
     test('A failed security request settles every row and raises a notification', async () => {
@@ -353,6 +494,10 @@ describe('OAuthClientSecurityPage', () => {
         expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('');
       });
 
+      const loadingNames = renderedClientNames();
+      expect(loadingNames).toHaveLength(DEFAULT_SEARCH_COUNT);
+      expect(skeletonCount()).toBe(loadingNames.length);
+
       await act(async () => {
         deferred.reject(new Error(LINT_ERROR_MESSAGE));
       });
@@ -362,8 +507,33 @@ describe('OAuthClientSecurityPage', () => {
       await waitFor(() => {
         expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe(EM_DASH);
       });
-      expect(getSecurityCellText(WILDCARD_CLIENT_NAME)).toBe(EM_DASH);
+
+      expect(renderedClientNames()).toStrictEqual(loadingNames);
+      for (const name of loadingNames) {
+        const securityCell = getCell(name, SECURITY_COLUMN_INDEX);
+        expect(securityCell.textContent).toBe(EM_DASH);
+        expect(securityCell.querySelector(SKELETON_SELECTOR)).toBeNull();
+      }
+      expect(skeletonCount()).toBe(0);
     });
+  });
+
+  test('Renders the review for a super administrator who is not a project administrator', async () => {
+    vi.spyOn(medplum, 'isProjectAdmin').mockImplementation(() => false);
+    vi.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
+
+    await setup();
+
+    expect(await screen.findByRole('heading', { name: 'OAuth Client Security' })).toBeInTheDocument();
+    expect(screen.getByText('Security')).toBeInTheDocument();
+    expect(screen.queryByText('Forbidden')).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('pass');
+    });
+
+    expect(getSecurityCellText(WILDCARD_CLIENT_NAME)).toBe('fail');
+    expect(lintCallUrls()).toHaveLength(1);
   });
 
   test('Renders the forbidden alert instead of the table for a non-administrator (UI gating only)', async () => {
