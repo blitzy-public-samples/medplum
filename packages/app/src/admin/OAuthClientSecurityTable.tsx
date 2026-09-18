@@ -4,7 +4,7 @@ import { Skeleton, Stack, Text } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
 import type { SearchRequest } from '@medplum/core';
 import { DEFAULT_SEARCH_COUNT, normalizeErrorString, Operator } from '@medplum/core';
-import type { Resource } from '@medplum/fhirtypes';
+import type { ClientApplication, Resource } from '@medplum/fhirtypes';
 import type { SearchControlAdditionalColumn, SearchLoadEvent } from '@medplum/react';
 import { SearchControl, StatusBadge, useMedplum } from '@medplum/react';
 import type { JSX, ReactNode } from 'react';
@@ -128,6 +128,19 @@ function renderEmptyCell(): JSX.Element {
 }
 
 /**
+ * Merges the redirect URIs registered on a searched client application, deprecated singular field first.
+ * @param resource - The client application row returned by the FHIR search.
+ * @returns The redirect URIs the resource carries, empty when it carries none.
+ */
+function getResourceRedirectUris(resource: Resource): string[] {
+  const { redirectUri, redirectUris } = resource as ClientApplication;
+  return [
+    ...(typeof redirectUri === 'string' && redirectUri !== '' ? [redirectUri] : []),
+    ...(isStringArray(redirectUris) ? redirectUris : []),
+  ];
+}
+
+/**
  * Renders the read-only OAuth client security review table for the current project.
  * @returns The table of client applications with their registered redirect URIs and security status.
  */
@@ -208,13 +221,8 @@ export function OAuthClientSecurityTable(): JSX.Element {
         name: 'Redirect URIs',
         renderCell: (resource: Resource): ReactNode => {
           const cellState = resource.id ? cellStates[resource.id] : undefined;
-          if (cellState?.kind === 'loading') {
-            return <Skeleton height="var(--mantine-font-size-sm)" radius="sm" />;
-          }
-          if (cellState?.kind !== 'resolved') {
-            return renderEmptyCell();
-          }
-          const uris = cellState.result.redirectUris;
+          const uris =
+            cellState?.kind === 'resolved' ? cellState.result.redirectUris : getResourceRedirectUris(resource);
           if (uris.length === 0) {
             return renderEmptyCell();
           }

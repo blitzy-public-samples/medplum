@@ -62,7 +62,6 @@ interface ValidationCase {
   readonly unfiltered?: boolean;
 }
 
-const INVALID_PROJECT_ID_OUTCOME = 'Invalid project id';
 const INVALID_ID_OUTCOME = 'Invalid _id search parameter';
 const INVALID_COUNT_OUTCOME = 'Invalid _count search parameter';
 const INVALID_OFFSET_OUTCOME = 'Invalid _offset search parameter';
@@ -744,32 +743,31 @@ describe('OAuth client security endpoint', () => {
       expect(report.total).toStrictEqual(fullIds.length);
     });
 
-    test('Offset above the configured repository offset ceiling is refused', async () => {
+    test('Offset above the configured repository offset ceiling returns no clients and the full total', async () => {
       const maxSearchOffset = getConfig().maxSearchOffset;
       expect(maxSearchOffset).toBeGreaterThan(0);
 
       const res = await readReport(pagingProjectId, pagingAccessToken, '?_offset=' + (maxSearchOffset + 1));
-      expect(res).toHaveStatus(400);
-      expect(res.body.resourceType).toStrictEqual('OperationOutcome');
-      expect(res.body.issue[0].code).toStrictEqual('invalid');
-      expect(res.body.issue[0].details.text).toStrictEqual(
-        'Search offset exceeds maximum (got ' + (maxSearchOffset + 1) + ', max ' + maxSearchOffset + ')'
-      );
-      expect(res.body.results).toBeUndefined();
+      expect(res).toHaveStatus(200);
+
+      const report = reportOf(res);
+      expect(report.results).toStrictEqual([]);
+      expect(report.offset).toStrictEqual(maxSearchOffset + 1);
+      expect(report.count).toStrictEqual(DEFAULT_SEARCH_COUNT);
+      expect(report.total).toStrictEqual(fullIds.length);
     });
 
-    test('Offset above the safe integer ceiling is refused by the repository offset ceiling', async () => {
-      const maxSearchOffset = getConfig().maxSearchOffset;
-
+    test('Offset above the safe integer ceiling returns no clients and the full total', async () => {
       const res = await readReport(pagingProjectId, pagingAccessToken, '?_offset=' + ABOVE_SAFE_INTEGER_VALUE);
-      expect(res).toHaveStatus(400);
-      expect(res.body.issue[0].details.text).toStrictEqual(
-        'Search offset exceeds maximum (got ' + ABOVE_SAFE_INTEGER_VALUE + ', max ' + maxSearchOffset + ')'
-      );
-      expect(res.body.results).toBeUndefined();
+      expect(res).toHaveStatus(200);
+
+      const report = reportOf(res);
+      expect(report.results).toStrictEqual([]);
+      expect(report.offset).toStrictEqual(Number(ABOVE_SAFE_INTEGER_VALUE));
+      expect(report.total).toStrictEqual(fullIds.length);
     });
 
-    test('Page at the repository offset ceiling is returned and the page past it is refused', async () => {
+    test('Page at the repository offset ceiling is returned and a page within the result set past it is refused', async () => {
       const previousMaxSearchOffset = getConfig().maxSearchOffset;
       getConfig().maxSearchOffset = 2;
       try {
@@ -782,9 +780,25 @@ describe('OAuth client security endpoint', () => {
         expect(report.total).toStrictEqual(fullIds.length);
         expect(report.results).toHaveLength(2);
 
-        const pastCeiling = await readReport(pagingProjectId, pagingAccessToken, '?_count=2&_offset=3');
-        expect(pastCeiling).toHaveStatus(400);
-        expect(pastCeiling.body.issue[0].details.text).toStrictEqual('Search offset exceeds maximum (got 3, max 2)');
+        const withinResultSet = await readReport(pagingProjectId, pagingAccessToken, '?_count=2&_offset=3');
+        expect(withinResultSet).toHaveStatus(400);
+        expect(withinResultSet.body.issue[0].code).toStrictEqual('invalid');
+        expect(withinResultSet.body.issue[0].details.text).toStrictEqual(
+          'Search offset exceeds maximum (got 3, max 2)'
+        );
+        expect(withinResultSet.body.results).toBeUndefined();
+
+        const beyondResultSet = await readReport(
+          pagingProjectId,
+          pagingAccessToken,
+          '?_count=2&_offset=' + fullIds.length
+        );
+        expect(beyondResultSet).toHaveStatus(200);
+
+        const beyondReport = reportOf(beyondResultSet);
+        expect(beyondReport.results).toStrictEqual([]);
+        expect(beyondReport.offset).toStrictEqual(fullIds.length);
+        expect(beyondReport.total).toStrictEqual(fullIds.length);
       } finally {
         getConfig().maxSearchOffset = previousMaxSearchOffset;
       }
@@ -847,29 +861,67 @@ describe('OAuth client security endpoint', () => {
       { shape: 'a traversal like value', projectId: '%2e%2e%2fsuper' },
     ];
 
-    test.each(malformedProjectIds)('Super admin naming a project id of $shape is refused', async ({ projectId }) => {
-      const superAdminAccessToken = await getSuperAdminAccessToken();
+    let superAdminCallerAccessToken: string;
+    let superAdminCallerClientId: string;
+    let otherProjectClientId: string;
 
-      const res = await readReport(projectId, superAdminAccessToken);
-      expect(res).toHaveStatus(400);
-      expect(res.body.resourceType).toStrictEqual('OperationOutcome');
-      expect(res.body.issue[0].code).toStrictEqual('invalid');
-      expect(res.body.issue[0].details.text).toStrictEqual(INVALID_PROJECT_ID_OUTCOME);
-      expect(res.body.results).toBeUndefined();
+    beforeAll(async () => {
+      const caller = await createTestProject({
+        superAdmin: true,
+        membership: { admin: true },
+        withClient: true,
+        withAccessToken: true,
+      });
+      superAdminCallerAccessToken = caller.accessToken;
+      superAdminCallerClientId = caller.client.id;
+
+      const other = await createTestProject({ withRepo: true });
+      const otherClient = await withTestContext(() =>
+        other.repo.createResource(clientFixture('Path Validation Other Project Client', [EXACT_CALLBACK_URI]))
+      );
+      otherProjectClientId = otherClient.id;
     });
 
-    test.each(malformedProjectIds)('Project admin naming a project id of $shape is refused', async ({ projectId }) => {
-      const res = await readReport(projectId, projectAdmin.accessToken);
-      expect(res).toHaveStatus(400);
-      expect(res.body.issue[0].code).toStrictEqual('invalid');
-      expect(res.body.issue[0].details.text).toStrictEqual(INVALID_PROJECT_ID_OUTCOME);
-      expect(res.body.results).toBeUndefined();
-    });
+    test.each(malformedProjectIds)(
+      'Super admin naming a project id of $shape receives the report for their own project',
+      async ({ projectId }) => {
+        const res = await readReport(projectId, superAdminCallerAccessToken, '?_count=' + DEFAULT_MAX_SEARCH_COUNT);
+        expect(res).toHaveStatus(200);
+
+        const ids = sortedResultIds(reportOf(res));
+        expect(ids).toStrictEqual([superAdminCallerClientId]);
+        expect(ids).not.toContain(otherProjectClientId);
+      }
+    );
+
+    test.each(malformedProjectIds)(
+      'Project admin naming a project id of $shape is forbidden',
+      async ({ projectId }) => {
+        const res = await readReport(projectId, projectAdmin.accessToken);
+        expect(res).toHaveStatus(403);
+        expect(res.body.resourceType).toStrictEqual('OperationOutcome');
+        expect(res.body.issue[0].code).toStrictEqual('forbidden');
+        expect(res.body.results).toBeUndefined();
+      }
+    );
 
     test('Super admin naming a project id that does not exist receives no report', async () => {
       const superAdminAccessToken = await getSuperAdminAccessToken();
 
       const res = await readReport(randomUUID(), superAdminAccessToken);
+      expect(res).toHaveStatus(404);
+      expect(res.body.resourceType).toStrictEqual('OperationOutcome');
+      expect(res.body.results).toBeUndefined();
+    });
+
+    test('Super admin naming a project id that does not exist receives no report above the offset ceiling', async () => {
+      const superAdminAccessToken = await getSuperAdminAccessToken();
+
+      const res = await readReport(
+        randomUUID(),
+        superAdminAccessToken,
+        '?_offset=' + (getConfig().maxSearchOffset + 1)
+      );
       expect(res).toHaveStatus(404);
       expect(res.body.resourceType).toStrictEqual('OperationOutcome');
       expect(res.body.results).toBeUndefined();
@@ -905,6 +957,152 @@ describe('OAuth client security endpoint', () => {
       expect(sortedResultIds(reportOf(decorated))).toStrictEqual(sortedResultIds(reportOf(plain)));
       expect(reportOf(decorated).total).toStrictEqual(reportOf(plain).total);
       expect(sortedResultIds(reportOf(decorated))).not.toContain(otherClient.id);
+    });
+  });
+
+  describe('Complete evaluation and response ceiling', () => {
+    /** The number of redirect URIs the flagged client registers, the last of which is `WILDCARD_URI`. */
+    const FLAGGED_URI_COUNT = 25;
+
+    /** The maximum serialized response size the endpoint applies, in UTF-8 bytes. */
+    const MAX_REPORT_RESPONSE_BYTES = 4 * 1024 * 1024;
+
+    /** The character length of each redirect URI the large fixtures register. */
+    const LARGE_URI_LENGTH = 2400;
+
+    /** The number of redirect URIs a client registers to report under the ceiling on its own but not in pairs. */
+    const HALF_CEILING_URI_COUNT = 300;
+
+    /** The number of redirect URIs a client registers to report over the ceiling on its own. */
+    const OVER_CEILING_URI_COUNT = 600;
+
+    let ceilingProjectId: string;
+    let ceilingAccessToken: string;
+    let flaggedClientId: string;
+    let flaggedUris: string[];
+    let firstHalfCeilingClientId: string;
+    let secondHalfCeilingClientId: string;
+    let overCeilingClientId: string;
+    let smallClientId: string;
+
+    beforeAll(async () => {
+      const ceiling = await createTestProject({
+        membership: { admin: true },
+        withAccessToken: true,
+        withRepo: true,
+      });
+      ceilingProjectId = ceiling.project.id;
+      ceilingAccessToken = ceiling.accessToken;
+
+      flaggedUris = [
+        ...Array.from({ length: FLAGGED_URI_COUNT - 1 }, (_, index) => 'https://app' + index + '.example.com'),
+        WILDCARD_URI,
+      ];
+      const largeUris = (count: number): string[] =>
+        Array.from({ length: count }, (_, index) => {
+          const prefix = 'https://app' + index + '.example.com/?next=';
+          return prefix + 'a'.repeat(LARGE_URI_LENGTH - prefix.length - 1) + '*';
+        });
+
+      const flagged = await withTestContext(() =>
+        ceiling.repo.createResource(clientFixture('Flagged Redirect URI Client', flaggedUris))
+      );
+      const firstHalfCeiling = await withTestContext(() =>
+        ceiling.repo.createResource(clientFixture('First Half Ceiling Client', largeUris(HALF_CEILING_URI_COUNT)))
+      );
+      const secondHalfCeiling = await withTestContext(() =>
+        ceiling.repo.createResource(clientFixture('Second Half Ceiling Client', largeUris(HALF_CEILING_URI_COUNT)))
+      );
+      const overCeiling = await withTestContext(() =>
+        ceiling.repo.createResource(clientFixture('Over Ceiling Client', largeUris(OVER_CEILING_URI_COUNT)))
+      );
+      const small = await withTestContext(() =>
+        ceiling.repo.createResource(clientFixture('Small Ceiling Client', [EXACT_CALLBACK_URI]))
+      );
+
+      flaggedClientId = flagged.id;
+      firstHalfCeilingClientId = firstHalfCeiling.id;
+      secondHalfCeilingClientId = secondHalfCeiling.id;
+      overCeilingClientId = overCeiling.id;
+      smallClientId = small.id;
+    });
+
+    test('Client registering twenty-five redirect URIs is evaluated in full', async () => {
+      const res = await readReport(ceilingProjectId, ceilingAccessToken, '?_id=' + flaggedClientId);
+      expect(res).toHaveStatus(200);
+
+      const result = resultById(reportOf(res), flaggedClientId);
+      expect(result.redirectUris).toStrictEqual(flaggedUris);
+      expect(findingsOf(result, 'OCS-001')).toHaveLength(FLAGGED_URI_COUNT - 1);
+      expect(findingsOf(result, 'OCS-002')).toHaveLength(1);
+      expect(findingsOf(result, 'OCS-002')[0].redirectUri).toStrictEqual(WILDCARD_URI);
+      expect(ruleIdsOf(result)).toHaveLength(FLAGGED_URI_COUNT);
+      expect(result.status).toStrictEqual('fail');
+      expect(JSON.stringify(res.body)).not.toContain('OCS-006');
+      expect(Object.keys(result).sort((a, b) => a.localeCompare(b))).toStrictEqual([
+        'findings',
+        'id',
+        'name',
+        'redirectUris',
+        'status',
+      ]);
+    });
+
+    test('Page stops at the serialized byte ceiling and leaves every client reachable', async () => {
+      const res = await readReport(
+        ceilingProjectId,
+        ceilingAccessToken,
+        '?_count=2&_id=' + firstHalfCeilingClientId + ',' + secondHalfCeilingClientId
+      );
+      expect(res).toHaveStatus(200);
+      expect(Buffer.byteLength(JSON.stringify(res.body), 'utf8')).toBeLessThanOrEqual(MAX_REPORT_RESPONSE_BYTES);
+
+      const report = reportOf(res);
+      expect(report.total).toStrictEqual(2);
+      expect(report.count).toStrictEqual(2);
+      expect(report.results).toHaveLength(1);
+      expect([firstHalfCeilingClientId, secondHalfCeilingClientId]).toContain(report.results[0].id);
+      expect(report.results[0].redirectUris).toHaveLength(HALF_CEILING_URI_COUNT);
+      expect(report.results[0].findings).toHaveLength(HALF_CEILING_URI_COUNT * 2);
+
+      const omittedClientId =
+        report.results[0].id === firstHalfCeilingClientId ? secondHalfCeilingClientId : firstHalfCeilingClientId;
+      const omitted = await readReport(ceilingProjectId, ceilingAccessToken, '?_id=' + omittedClientId);
+      expect(omitted).toHaveStatus(200);
+
+      const omittedResult = resultById(reportOf(omitted), omittedClientId);
+      expect(omittedResult.redirectUris).toHaveLength(HALF_CEILING_URI_COUNT);
+      expect(omittedResult.findings).toHaveLength(HALF_CEILING_URI_COUNT * 2);
+
+      const small = await readReport(ceilingProjectId, ceilingAccessToken, '?_id=' + smallClientId);
+      expect(small).toHaveStatus(200);
+      expect(resultById(reportOf(small), smallClientId).redirectUris).toStrictEqual([EXACT_CALLBACK_URI]);
+    });
+
+    test('Client whose report alone exceeds the ceiling is refused rather than returned incomplete', async () => {
+      const res = await readReport(ceilingProjectId, ceilingAccessToken, '?_id=' + overCeilingClientId);
+      expect(res).toHaveStatus(413);
+      expect(Buffer.byteLength(JSON.stringify(res.body), 'utf8')).toBeLessThanOrEqual(MAX_REPORT_RESPONSE_BYTES);
+      expect(res.body.resourceType).toStrictEqual('OperationOutcome');
+      expect(res.body.issue[0].code).toStrictEqual('too-long');
+      expect(res.body.issue[0].details.text).toStrictEqual(
+        'OAuth client security report for client ' +
+          overCeilingClientId +
+          ' exceeds the maximum response size of ' +
+          MAX_REPORT_RESPONSE_BYTES +
+          ' bytes'
+      );
+      expect(res.body.results).toBeUndefined();
+
+      const others = await readReport(
+        ceilingProjectId,
+        ceilingAccessToken,
+        '?_id=' + firstHalfCeilingClientId + ',' + smallClientId
+      );
+      expect(others).toHaveStatus(200);
+      expect(sortedResultIds(reportOf(others))).toStrictEqual(
+        [firstHalfCeilingClientId, smallClientId].sort((a, b) => a.localeCompare(b))
+      );
     });
   });
 

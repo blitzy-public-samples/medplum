@@ -3,6 +3,7 @@
 import type { Filter, SearchRequest, WithId } from '@medplum/core';
 import {
   badRequest,
+  contentTooLarge,
   DEFAULT_MAX_SEARCH_COUNT,
   DEFAULT_SEARCH_COUNT,
   forbidden,
@@ -21,11 +22,21 @@ import type {
   OAuthClientLintResult,
   RegistrationDiscoverableClient,
 } from '../oauth/clientlint';
-import { indexRegistrationDiscoverableClients, lintOAuthClient } from '../oauth/clientlint';
+import { lintOAuthClient } from '../oauth/clientlint';
 import { getClientRedirectUris, getStandardClientById } from '../oauth/clients';
 
 const UNSIGNED_INTEGER_PATTERN = /^\d+$/;
 const REPORT_QUERY_PARAMS = ['_id', '_count', '_offset'] as const;
+
+/**
+ * The maximum serialized size, in UTF-8 bytes, of one report response. A client evaluation that does not fit within
+ * the remaining bytes is not admitted, so no response exceeds this size; a page whose first evaluation does not fit
+ * on its own is refused with `contentTooLarge` rather than returned incomplete.
+ */
+const MAX_REPORT_RESPONSE_BYTES = 4 * 1024 * 1024;
+
+/** The bytes one result adds to the serialized `results` array beyond its own length: the element separator. */
+const RESULT_SEPARATOR_BYTES = 1;
 
 function reportQuery(req: Request): URLSearchParams {
   const separator = req.originalUrl.indexOf('?');
@@ -68,13 +79,13 @@ function parseOffsetParam(raw: string | null): number | undefined {
 }
 
 function resolveProjectId(project: WithId<Project>, requestedProjectId: string | undefined): string | undefined {
-  if (requestedProjectId === undefined) {
+  if (project.superAdmin) {
+    return requestedProjectId !== undefined && isUUID(requestedProjectId) ? requestedProjectId : project.id;
+  }
+  if (requestedProjectId === undefined || requestedProjectId === project.id) {
     return project.id;
   }
-  if (project.superAdmin) {
-    return requestedProjectId;
-  }
-  return requestedProjectId === project.id ? project.id : undefined;
+  return undefined;
 }
 
 function buildRegistrationDiscoverableClients(): RegistrationDiscoverableClient[] {
@@ -105,13 +116,7 @@ function buildRegistrationDiscoverableClients(): RegistrationDiscoverableClient[
 export async function clientSecurityHandler(req: Request, res: Response): Promise<void> {
   const ctx = getAuthenticatedContext();
 
-  const requestedProjectId = singularize(req.params.projectId);
-  if (requestedProjectId !== undefined && !isUUID(requestedProjectId)) {
-    sendOutcome(res, badRequest('Invalid project id'));
-    return;
-  }
-
-  const resolvedProjectId = resolveProjectId(ctx.project, requestedProjectId);
+  const resolvedProjectId = resolveProjectId(ctx.project, singularize(req.params.projectId));
   if (!resolvedProjectId) {
     sendOutcome(res, forbidden);
     return;
@@ -174,18 +179,51 @@ export async function clientSecurityHandler(req: Request, res: Response): Promis
       ? ctx.project.setting
       : (await ctx.repo.readResource<Project>('Project', resolvedProjectId)).setting;
 
+  if (offset > getConfig().maxSearchOffset) {
+    const matched = await ctx.repo.search<ClientApplication>({ ...search, count: 0, offset: 0 });
+    const matchedTotal = matched.total ?? 0;
+    if (offset >= matchedTotal) {
+      res.json({ total: matchedTotal, offset, count, results: [] });
+      return;
+    }
+  }
+
   const options: OAuthClientLintOptions = {
     partialRedirectMatchEnabled: setting?.find((s) => s.name === 'allow-dangerous-redirect')?.valueBoolean === true,
-    registrationDiscoverableClients: indexRegistrationDiscoverableClients(buildRegistrationDiscoverableClients()),
+    registrationDiscoverableClients: buildRegistrationDiscoverableClients(),
   };
 
   const bundle = await ctx.repo.search<ClientApplication>(search);
   const results: OAuthClientLintResult[] = [];
+  let responseBytes = Buffer.byteLength(
+    JSON.stringify({ total: bundle.total ?? count, offset, count, results: [] }),
+    'utf8'
+  );
   for (const entry of bundle.entry ?? []) {
     const client = entry.resource;
-    if (client?.resourceType === 'ClientApplication') {
-      results.push(lintOAuthClient(client, options));
+    if (client?.resourceType !== 'ClientApplication') {
+      continue;
     }
+    const result = lintOAuthClient(client, options);
+    const resultBytes = Buffer.byteLength(JSON.stringify(result), 'utf8') + RESULT_SEPARATOR_BYTES;
+    if (responseBytes + resultBytes > MAX_REPORT_RESPONSE_BYTES) {
+      if (results.length === 0) {
+        sendOutcome(
+          res,
+          contentTooLarge(
+            'OAuth client security report for client ' +
+              client.id +
+              ' exceeds the maximum response size of ' +
+              MAX_REPORT_RESPONSE_BYTES +
+              ' bytes'
+          )
+        );
+        return;
+      }
+      break;
+    }
+    responseBytes += resultBytes;
+    results.push(result);
   }
 
   res.json({ total: bundle.total ?? results.length, offset, count, results });
