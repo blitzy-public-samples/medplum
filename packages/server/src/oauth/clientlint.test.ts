@@ -530,6 +530,99 @@ describe('lintOAuthClient', () => {
     expect(result.status).toBe('warning');
   });
 
+  test('emits one bare-origin finding for a redirect URI listed twice in the redirectUris list', () => {
+    const result = lintOAuthClient(client({ redirectUris: ['https://dup.example.com', 'https://dup.example.com'] }));
+
+    expect(result.redirectUris).toStrictEqual(['https://dup.example.com', 'https://dup.example.com']);
+    expect(ruleIds(result)).toStrictEqual(['OCS-001']);
+    expect(onlyFindingForRule(result, 'OCS-001').redirectUri).toBe('https://dup.example.com');
+    expect(onlyFindingForRule(result, 'OCS-001').status).toBe('warning');
+    expect(result.status).toBe('warning');
+  });
+
+  test('emits one bare-origin finding when the deprecated singular redirectUri repeats a redirectUris entry', () => {
+    const result = lintOAuthClient(
+      client({ redirectUri: 'https://dup.example.com', redirectUris: ['https://dup.example.com'] })
+    );
+
+    expect(result.redirectUris).toStrictEqual(['https://dup.example.com', 'https://dup.example.com']);
+    expect(result.redirectUris).toHaveLength(2);
+    expect(ruleIds(result)).toStrictEqual(['OCS-001']);
+    expect(onlyFindingForRule(result, 'OCS-001').redirectUri).toBe('https://dup.example.com');
+    expect(onlyFindingForRule(result, 'OCS-001').status).toBe('warning');
+    expect(result.status).toBe('warning');
+  });
+
+  test('emits one finding per rule for a wildcard listed twice and a bare origin listed three times', () => {
+    const registered = [
+      'https://app.example.com/*',
+      'https://app.example.com',
+      'https://app.example.com/*',
+      'https://app.example.com',
+      'https://app.example.com',
+    ];
+
+    const result = lintOAuthClient(client({ redirectUris: registered }));
+
+    expect(result.redirectUris).toStrictEqual(registered);
+    expect(result.redirectUris).toHaveLength(5);
+    expect(ruleIds(result)).toStrictEqual(['OCS-002', 'OCS-001']);
+    expect(onlyFindingForRule(result, 'OCS-002').redirectUri).toBe('https://app.example.com/*');
+    expect(onlyFindingForRule(result, 'OCS-001').redirectUri).toBe('https://app.example.com');
+    expect(result.status).toBe('fail');
+  });
+
+  test('emits one prefix-matching finding for a duplicated parseable redirect URI', () => {
+    const registered = ['https://dup.example.com', 'https://dup.example.com'];
+
+    const result = lintOAuthClient(client({ redirectUris: registered }), { partialRedirectMatchEnabled: true });
+
+    expect(result.redirectUris).toStrictEqual(registered);
+    expect(ruleIds(result)).toStrictEqual(['OCS-001', 'OCS-003']);
+    expect(onlyFindingForRule(result, 'OCS-003').redirectUri).toBe('https://dup.example.com');
+    expect(onlyFindingForRule(result, 'OCS-003').status).toBe('fail');
+    expect(onlyFindingForRule(result, 'OCS-001').status).toBe('fail');
+    expect(result.status).toBe('fail');
+  });
+
+  test('gives every finding of a duplicate-heavy client a distinct rule and redirect URI pair', () => {
+    const result = lintOAuthClient(
+      client({
+        redirectUri: 'https://dup.example.com',
+        redirectUris: [
+          'https://dup.example.com',
+          'https://app.example.com/*',
+          'https://app.example.com/*',
+          'https://app.example.com/oauth/callback',
+          'https://app.example.com/oauth/callback',
+          'not a url/*',
+          'not a url/*',
+        ],
+      }),
+      {
+        partialRedirectMatchEnabled: true,
+        registrationDiscoverableClients: [
+          { id: 'other-client', redirectUris: ['https://dup.example.com'], source: 'config' },
+        ],
+      }
+    );
+
+    const keys = result.findings.map((finding) => finding.ruleId + '|' + (finding.redirectUri ?? ''));
+
+    expect(result.redirectUris).toHaveLength(8);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(ruleIds(result)).toStrictEqual([
+      'OCS-001',
+      'OCS-003',
+      'OCS-002',
+      'OCS-003',
+      'OCS-003',
+      'OCS-002',
+      'OCS-004',
+    ]);
+    expect(result.status).toBe('fail');
+  });
+
   test('returns the same result twice and leaves both arguments unchanged', () => {
     const subject = client({
       id: 'purity-client',

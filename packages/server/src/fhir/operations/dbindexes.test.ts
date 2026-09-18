@@ -3,6 +3,7 @@
 import { ContentType } from '@medplum/core';
 import type { ParametersParameter } from '@medplum/fhirtypes';
 import express from 'express';
+import { randomUUID } from 'node:crypto';
 import { escapeIdentifier } from 'pg';
 import request from 'supertest';
 import { initApp, shutdownApp } from '../../app';
@@ -15,6 +16,11 @@ describe('dbgetginindexes', () => {
 
   let accessToken: string;
 
+  const tableName = 'Gin_Index_Test_Table_' + randomUUID().replaceAll('-', '').slice(0, 12);
+  const escapedTableName = escapeIdentifier(tableName);
+  const aaaIndexName = `${tableName}_aaa_idx`;
+  const bbbIndexName = `${tableName}_bbb_idx`;
+
   beforeAll(async () => {
     const config = await loadTestConfig();
     await initApp(app, config);
@@ -25,17 +31,16 @@ describe('dbgetginindexes', () => {
     await client.query(`DROP TABLE IF EXISTS ${escapedTableName}`);
     await client.query(`CREATE TABLE ${escapedTableName} (aaa UUID[], bbb TEXT[])`);
     await client.query(
-      `CREATE INDEX CONCURRENTLY "Gin_Index_Test_Table_aaa_idx" ON ${escapedTableName} USING gin (aaa) WITH (fastupdate = ye, gin_pending_list_limit = 1024)`
+      `CREATE INDEX CONCURRENTLY ${escapeIdentifier(aaaIndexName)} ON ${escapedTableName} USING gin (aaa) WITH (fastupdate = ye, gin_pending_list_limit = 1024)`
     );
     await client.query(
-      `CREATE INDEX CONCURRENTLY "Gin_Index_Test_Table_bbb_idx" ON ${escapedTableName} USING gin (bbb)`
+      `CREATE INDEX CONCURRENTLY ${escapeIdentifier(bbbIndexName)} ON ${escapedTableName} USING gin (bbb)`
     );
   });
 
-  const tableName = 'Gin_Index_Test_Table';
-  const escapedTableName = escapeIdentifier(tableName);
-
   afterAll(async () => {
+    // Drop the test table and its indexes
+    await getDatabasePool(DatabaseMode.WRITER).query(`DROP TABLE IF EXISTS ${escapedTableName}`);
     await shutdownApp();
   });
 
@@ -76,8 +81,8 @@ describe('dbgetginindexes', () => {
     expect(indexes).toHaveLength(2);
 
     expect(indexes[0].name).toBe('index');
-    expect(indexes[0].part?.find((p) => p.name === 'tableName')?.valueString).toBe('Gin_Index_Test_Table');
-    expect(indexes[0].part?.find((p) => p.name === 'indexName')?.valueString).toBe('Gin_Index_Test_Table_aaa_idx');
+    expect(indexes[0].part?.find((p) => p.name === 'tableName')?.valueString).toBe(tableName);
+    expect(indexes[0].part?.find((p) => p.name === 'indexName')?.valueString).toBe(aaaIndexName);
     expect(indexes[0].part?.find((p) => p.name === 'fastUpdate')?.valueBoolean).toBe(true);
     expect(indexes[0].part?.find((p) => p.name === 'indexOptions')?.valueString).toBe(
       '{fastupdate=ye,gin_pending_list_limit=1024}'
@@ -85,8 +90,8 @@ describe('dbgetginindexes', () => {
     expect(indexes[0].part?.find((p) => p.name === 'ginPendingListLimit')?.valueInteger).toBe(1024);
 
     expect(indexes[1].name).toBe('index');
-    expect(indexes[1].part?.find((p) => p.name === 'tableName')?.valueString).toBe('Gin_Index_Test_Table');
-    expect(indexes[1].part?.find((p) => p.name === 'indexName')?.valueString).toBe('Gin_Index_Test_Table_bbb_idx');
+    expect(indexes[1].part?.find((p) => p.name === 'tableName')?.valueString).toBe(tableName);
+    expect(indexes[1].part?.find((p) => p.name === 'indexName')?.valueString).toBe(bbbIndexName);
     expect(indexes[1].part?.find((p) => p.name === 'fastUpdate')?.valueBoolean).toBeUndefined();
     expect(indexes[1].part?.find((p) => p.name === 'indexOptions')).toBeUndefined();
     expect(indexes[1].part?.find((p) => p.name === 'ginPendingListLimit')?.valueInteger).toBeUndefined();

@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Skeleton, Stack, Text } from '@mantine/core';
+import { Box, rem, Skeleton, Stack, Text } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
 import type { SearchRequest } from '@medplum/core';
 import { DEFAULT_SEARCH_COUNT, normalizeErrorString, Operator } from '@medplum/core';
 import type { ClientApplication, Resource } from '@medplum/fhirtypes';
 import type { SearchControlAdditionalColumn, SearchLoadEvent } from '@medplum/react';
-import { SearchControl, StatusBadge, useMedplum } from '@medplum/react';
-import type { JSX, ReactNode } from 'react';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { MedplumLink, SearchControl, StatusBadge, useMedplum } from '@medplum/react';
+import type { CSSProperties, JSX, ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { getProjectId } from '../utils';
 
@@ -46,14 +46,25 @@ const LOADING_CELL: SecurityCellState = { kind: 'loading' };
 const UNAVAILABLE_CELL: SecurityCellState = { kind: 'unavailable' };
 
 const STATUS_COLORS: Record<OAuthClientLintStatus, string> = {
-  pass: 'green',
-  warning: 'orange',
-  fail: 'red',
+  pass: 'green.6',
+  warning: 'orange.6',
+  fail: 'red.6',
 };
 
-const UNRECOGNIZED_STATUS_COLOR = 'red';
+const STATUS_VARIANT = 'filled';
+
+const STATUS_LABEL_COLOR = 'black';
 
 const MALFORMED_REPORT_MESSAGE = 'The OAuth client security review returned an unexpected response.';
+
+const DISMISS_BUTTON_PROPS = { 'aria-label': 'Dismiss' };
+
+const PROJECT_FILTER_CODE = '_project';
+
+const FILTER_NOTICE =
+  'A column filter is applied, so this review lists only the OAuth clients that match it. Clear the filter from the column header menu to review every client again.';
+
+const CLIENT_APPLICATION_SORT_CODE = 'name';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -116,14 +127,35 @@ function parseSecurityReport(response: unknown): { report?: OAuthClientLintRepor
 }
 
 function getStatusColor(status: string): string {
-  return isLintStatus(status) ? STATUS_COLORS[status] : UNRECOGNIZED_STATUS_COLOR;
+  return isLintStatus(status) ? STATUS_COLORS[status] : STATUS_COLORS.fail;
 }
+
+const SECURITY_CELL_MIN_WIDTH = rem(80);
+const SECURITY_CELL_MIN_HEIGHT = rem(22);
+const STATUS_PLACEHOLDER_HEIGHT = 20;
+const STATUS_PLACEHOLDER_WIDTH = 74;
+const DETAIL_PATH_PREFIX = '/admin/oauth-security/';
+const DETAIL_LINK_TEXT = 'Review';
+const URI_TEXT_STYLE: CSSProperties = { overflowWrap: 'anywhere' };
 
 function renderEmptyCell(): JSX.Element {
   return (
     <Text c="dimmed" size="sm">
       —
     </Text>
+  );
+}
+
+/**
+ * Renders one security status cell inside the width and height the column reserves for every cell state.
+ * @param content - The status badge, the loading placeholder or the empty marker to render.
+ * @returns The cell content inside the reserved-size container.
+ */
+function renderSecurityCell(content: ReactNode): JSX.Element {
+  return (
+    <Box data-testid="security-status" miw={SECURITY_CELL_MIN_WIDTH} mih={SECURITY_CELL_MIN_HEIGHT}>
+      {content}
+    </Box>
   );
 }
 
@@ -141,6 +173,15 @@ function getResourceRedirectUris(resource: Resource): string[] {
 }
 
 /**
+ * Reports whether the search carries any filter beyond the project scope the table always applies.
+ * @param search - The search request currently driving the table.
+ * @returns True when a filter narrows the listed clients to a subset of the project's clients.
+ */
+function isNarrowedByFilter(search: SearchRequest): boolean {
+  return (search.filters ?? []).some((filter) => filter.code !== PROJECT_FILTER_CODE);
+}
+
+/**
  * Renders the read-only OAuth client security review table for the current project.
  * @returns The table of client applications with their registered redirect URIs and security status.
  */
@@ -155,10 +196,15 @@ export function OAuthClientSecurityTable(): JSX.Element {
   const [search, setSearch] = useState<SearchRequest>({
     resourceType: 'ClientApplication',
     fields: ['name'],
-    filters: [{ code: '_project', operator: Operator.EQUALS, value: projectId }],
+    filters: [{ code: PROJECT_FILTER_CODE, operator: Operator.EQUALS, value: projectId }],
+    sortRules: [{ code: CLIENT_APPLICATION_SORT_CODE }],
     count: DEFAULT_SEARCH_COUNT,
     total: 'accurate',
   });
+
+  useEffect(() => {
+    medplum.invalidateSearches('ClientApplication');
+  }, [medplum]);
 
   const handleLoad = useCallback(
     (e: SearchLoadEvent): void => {
@@ -197,7 +243,12 @@ export function OAuthClientSecurityTable(): JSX.Element {
           }
           setCellStates(nextStates);
           if (malformed) {
-            showNotification({ color: 'red', message: MALFORMED_REPORT_MESSAGE, autoClose: false });
+            showNotification({
+              color: 'red',
+              message: MALFORMED_REPORT_MESSAGE,
+              autoClose: false,
+              closeButtonProps: DISMISS_BUTTON_PROPS,
+            });
           }
         })
         .catch((err: unknown) => {
@@ -209,7 +260,12 @@ export function OAuthClientSecurityTable(): JSX.Element {
             nextStates[id] = UNAVAILABLE_CELL;
           }
           setCellStates(nextStates);
-          showNotification({ color: 'red', message: normalizeErrorString(err), autoClose: false });
+          showNotification({
+            color: 'red',
+            message: normalizeErrorString(err),
+            autoClose: false,
+            closeButtonProps: DISMISS_BUTTON_PROPS,
+          });
         });
     },
     [medplum, projectId]
@@ -217,6 +273,29 @@ export function OAuthClientSecurityTable(): JSX.Element {
 
   const additionalColumns = useMemo<SearchControlAdditionalColumn[]>(
     () => [
+      {
+        name: 'Security',
+        renderCell: (resource: Resource): ReactNode => {
+          const cellState = resource.id ? cellStates[resource.id] : undefined;
+          if (cellState?.kind === 'resolved') {
+            const status = cellState.result.status;
+            return renderSecurityCell(
+              <StatusBadge
+                status={status}
+                color={getStatusColor(status)}
+                variant={STATUS_VARIANT}
+                c={STATUS_LABEL_COLOR}
+              />
+            );
+          }
+          if (cellState?.kind === 'loading') {
+            return renderSecurityCell(
+              <Skeleton height={STATUS_PLACEHOLDER_HEIGHT} width={STATUS_PLACEHOLDER_WIDTH} radius="xl" />
+            );
+          }
+          return renderSecurityCell(renderEmptyCell());
+        },
+      },
       {
         name: 'Redirect URIs',
         renderCell: (resource: Resource): ReactNode => {
@@ -229,7 +308,7 @@ export function OAuthClientSecurityTable(): JSX.Element {
           return (
             <Stack gap="xs">
               {uris.map((uri, index) => (
-                <Text key={`${index}-${uri}`} size="sm">
+                <Text key={`${index}-${uri}`} size="sm" style={URI_TEXT_STYLE}>
                   {uri}
                 </Text>
               ))}
@@ -238,17 +317,22 @@ export function OAuthClientSecurityTable(): JSX.Element {
         },
       },
       {
-        name: 'Security',
+        name: 'Details',
         renderCell: (resource: Resource): ReactNode => {
-          const cellState = resource.id ? cellStates[resource.id] : undefined;
-          if (cellState?.kind === 'resolved') {
-            const status = cellState.result.status;
-            return <StatusBadge status={status} color={getStatusColor(status)} variant="light" />;
+          const clientId = resource.id;
+          if (!clientId) {
+            return renderEmptyCell();
           }
-          if (cellState?.kind === 'loading') {
-            return <Skeleton height={22} width={70} radius="xl" />;
-          }
-          return renderEmptyCell();
+          const { name } = resource as ClientApplication;
+          return (
+            <MedplumLink
+              to={`${DETAIL_PATH_PREFIX}${clientId}`}
+              label={`${DETAIL_LINK_TEXT} ${name ?? clientId}`}
+              size="sm"
+            >
+              {DETAIL_LINK_TEXT}
+            </MedplumLink>
+          );
         },
       },
     ],
@@ -256,15 +340,22 @@ export function OAuthClientSecurityTable(): JSX.Element {
   );
 
   return (
-    <SearchControl
-      search={search}
-      hideToolbar
-      hideFilters
-      onChange={(e) => setSearch(e.definition)}
-      onClick={(e) => navigate(`./${e.resource.id}`)}
-      onAuxClick={(e) => navigate(`./${e.resource.id}`)}
-      onLoad={handleLoad}
-      additionalColumns={additionalColumns}
-    />
+    <>
+      {isNarrowedByFilter(search) && (
+        <Text c="dimmed" size="sm" mb="md" role="status">
+          {FILTER_NOTICE}
+        </Text>
+      )}
+      <SearchControl
+        search={search}
+        hideToolbar
+        hideFilters
+        onChange={(e) => setSearch(e.definition)}
+        onClick={(e) => navigate(`./${e.resource.id}`)}
+        onAuxClick={(e) => navigate(`./${e.resource.id}`)}
+        onLoad={handleLoad}
+        additionalColumns={additionalColumns}
+      />
+    </>
   );
 }

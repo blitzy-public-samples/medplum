@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
+import { badRequest, getStatus, OperationOutcomeError } from '@medplum/core';
 import type { Client, PoolClient } from 'pg';
+import type { MockInstance } from 'vitest';
 import { globalLogger } from '../logger';
 import type { CTE, Operator, PgQueryable } from './sql';
 import {
@@ -9,12 +11,16 @@ import {
   Constant,
   Disjunction,
   InsertQuery,
+  isDatabaseConnectionError,
   IsNull,
   isPoolClient,
+  isRetryableTransactionError,
   isValidPostgresIdentifier,
   MAX_INDEX_DATA_BYTES,
   Negation,
+  normalizeDatabaseError,
   periodToRangeString,
+  PostgresError,
   resetSqlDebug,
   SelectQuery,
   setSqlDebug,
@@ -587,6 +593,322 @@ describe('truncateTextColumn', () => {
     expect(new TextEncoder().encode(result).length).toBeLessThanOrEqual(MAX_INDEX_DATA_BYTES);
     // Should keep all ASCII chars + 1 emoji (exactly MAX_INDEX_DATA_BYTES bytes)
     expect(result).toBe('a'.repeat(asciiLen) + '\u{1F600}');
+  });
+});
+
+describe('normalizeDatabaseError', () => {
+  let warnSpy: MockInstance;
+  let errorSpy: MockInstance;
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(globalLogger, 'warn').mockImplementation(() => undefined);
+    errorSpy = vi.spyOn(globalLogger, 'error').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
+  /**
+   * Builds an error with the shape of a `pg` DatabaseError.
+   * @param message - The driver message.
+   * @param fields - The driver fields, such as `code`, `severity` and `detail`.
+   * @returns An Error carrying the given driver fields.
+   */
+  function driverError(message: string, fields: Record<string, any> = {}): Error {
+    return Object.assign(new Error(message), fields);
+  }
+
+  test.each([
+    {
+      name: '23505 unique violation',
+      err: driverError('duplicate key value violates unique constraint "Patient_pkey"', {
+        code: PostgresError.UniqueViolation,
+        severity: 'ERROR',
+        detail: 'Key (id)=(abc) already exists.',
+      }),
+      status: 409,
+      issueCode: 'conflict',
+      outcomeText: 'Key (id)=(abc) already exists.',
+      retryable: false,
+      messageContains: 'Key (id)=(abc) already exists.',
+      bodyExcludes: [],
+    },
+    {
+      name: '40001 serialization failure',
+      err: driverError('could not serialize access due to concurrent update', {
+        code: PostgresError.SerializationFailure,
+        severity: 'ERROR',
+      }),
+      status: 409,
+      issueCode: 'conflict',
+      outcomeText: 'could not serialize access due to concurrent update',
+      retryable: true,
+      messageContains: 'could not serialize access due to concurrent update',
+      bodyExcludes: [],
+    },
+    {
+      name: '57014 query canceled',
+      err: driverError('canceling statement due to statement timeout', {
+        code: PostgresError.QueryCanceled,
+        severity: 'ERROR',
+      }),
+      status: 504,
+      issueCode: 'timeout',
+      outcomeText: 'canceling statement due to statement timeout',
+      retryable: false,
+      messageContains: 'canceling statement due to statement timeout',
+      bodyExcludes: [],
+    },
+    {
+      name: '25P02 in failed sql transaction',
+      err: driverError('current transaction is aborted, commands ignored until end of transaction block', {
+        code: PostgresError.InFailedSqlTransaction,
+        severity: 'ERROR',
+      }),
+      status: 400,
+      issueCode: 'invalid',
+      outcomeText: 'current transaction is aborted, commands ignored until end of transaction block',
+      retryable: false,
+      messageContains: 'current transaction is aborted, commands ignored until end of transaction block',
+      bodyExcludes: [],
+    },
+    {
+      name: '22008 datetime field overflow',
+      err: driverError('date/time field value out of range: "2023-02-29"', {
+        code: PostgresError.DatetimeFieldOverflow,
+        severity: 'ERROR',
+      }),
+      status: 400,
+      issueCode: 'invalid',
+      outcomeText: 'date/time field value out of range: "2023-02-29"',
+      retryable: false,
+      messageContains: 'date/time field value out of range: "2023-02-29"',
+      bodyExcludes: [],
+    },
+    {
+      name: 'FATAL 57P01 admin shutdown',
+      err: driverError('terminating connection due to administrator command', {
+        code: PostgresError.AdminShutdown,
+        severity: 'FATAL',
+        routine: 'ProcessInterrupts',
+      }),
+      status: 503,
+      issueCode: 'transient',
+      outcomeText: 'Database temporarily unavailable',
+      retryable: false,
+      messageContains: 'terminating connection due to administrator command',
+      bodyExcludes: ['terminating connection', '57P01', 'ProcessInterrupts'],
+    },
+    {
+      name: '08006 connection failure reported at ERROR severity',
+      err: driverError('connection to server was lost', {
+        code: PostgresError.ConnectionFailure,
+        severity: 'ERROR',
+      }),
+      status: 503,
+      issueCode: 'transient',
+      outcomeText: 'Database temporarily unavailable',
+      retryable: false,
+      messageContains: 'connection to server was lost',
+      bodyExcludes: ['connection to server was lost', '08006'],
+    },
+    {
+      name: '53300 too many connections',
+      err: driverError('sorry, too many clients already', {
+        code: PostgresError.TooManyConnections,
+        severity: 'FATAL',
+      }),
+      status: 503,
+      issueCode: 'transient',
+      outcomeText: 'Database temporarily unavailable',
+      retryable: false,
+      messageContains: 'sorry, too many clients already',
+      bodyExcludes: ['too many clients', '53300'],
+    },
+    {
+      name: 'PANIC severity with an unclassified code',
+      err: driverError('database system is shutting down', { code: 'XX000', severity: 'PANIC' }),
+      status: 503,
+      issueCode: 'transient',
+      outcomeText: 'Database temporarily unavailable',
+      retryable: false,
+      messageContains: 'database system is shutting down',
+      bodyExcludes: ['shutting down', 'XX000'],
+    },
+    {
+      name: 'ECONNREFUSED socket error without a message',
+      err: { code: 'ECONNREFUSED' } as any,
+      status: 503,
+      issueCode: 'transient',
+      outcomeText: 'Database temporarily unavailable',
+      retryable: false,
+      messageContains: 'ECONNREFUSED',
+      bodyExcludes: ['ECONNREFUSED'],
+    },
+    {
+      name: 'ETIMEDOUT socket error',
+      err: driverError('connect ETIMEDOUT 10.0.0.1:5432', { code: 'ETIMEDOUT' }),
+      status: 503,
+      issueCode: 'transient',
+      outcomeText: 'Database temporarily unavailable',
+      retryable: false,
+      messageContains: 'connect ETIMEDOUT 10.0.0.1:5432',
+      bodyExcludes: ['10.0.0.1', 'ETIMEDOUT'],
+    },
+    {
+      name: 'pg-pool connection loss with no code',
+      err: new Error('Connection terminated unexpectedly'),
+      status: 503,
+      issueCode: 'transient',
+      outcomeText: 'Database temporarily unavailable',
+      retryable: false,
+      messageContains: 'Connection terminated unexpectedly',
+      bodyExcludes: ['Connection terminated'],
+    },
+    {
+      name: 'pg-pool connect timeout with no code',
+      err: new Error('timeout exceeded when trying to connect'),
+      status: 503,
+      issueCode: 'transient',
+      outcomeText: 'Database temporarily unavailable',
+      retryable: false,
+      messageContains: 'timeout exceeded when trying to connect',
+      bodyExcludes: ['timeout exceeded'],
+    },
+    {
+      name: '42P01 undefined table',
+      err: driverError('relation "ClientApplication" does not exist', {
+        code: '42P01',
+        severity: 'ERROR',
+        position: '15',
+      }),
+      status: 500,
+      issueCode: 'exception',
+      outcomeText: 'Internal server error',
+      retryable: false,
+      messageContains: 'relation "ClientApplication" does not exist',
+      bodyExcludes: ['relation', 'does not exist', 'ClientApplication', '42P01'],
+    },
+    {
+      name: '42703 undefined column',
+      err: driverError('column "nope" does not exist', { code: '42703', severity: 'ERROR' }),
+      status: 500,
+      issueCode: 'exception',
+      outcomeText: 'Internal server error',
+      retryable: false,
+      messageContains: 'column "nope" does not exist',
+      bodyExcludes: ['column', 'does not exist', '42703'],
+    },
+    {
+      name: 'application error without a driver code',
+      err: new Error('some application bug'),
+      status: 400,
+      issueCode: 'invalid',
+      outcomeText: 'some application bug',
+      retryable: false,
+      messageContains: 'some application bug',
+      bodyExcludes: [],
+    },
+  ])('$name -> $status', ({ err, status, issueCode, outcomeText, retryable, messageContains, bodyExcludes }) => {
+    const result = normalizeDatabaseError(err);
+    expect(result).toBeInstanceOf(OperationOutcomeError);
+    expect(getStatus(result.outcome)).toStrictEqual(status);
+    expect(result.outcome.issue).toHaveLength(1);
+    expect(result.outcome.issue[0].code).toStrictEqual(issueCode);
+    expect(result.outcome.issue[0].details?.text).toStrictEqual(outcomeText);
+    expect(isRetryableTransactionError(result)).toBe(retryable);
+
+    // The driver message must survive for operators and for callers that match on Error.message
+    expect(result.message).toContain(messageContains);
+
+    // Nothing database-internal may reach the caller
+    const body = JSON.stringify(result.outcome);
+    for (const excluded of bodyExcludes) {
+      expect(body).not.toContain(excluded);
+    }
+  });
+
+  test('passes an OperationOutcomeError through unchanged', () => {
+    const original = new OperationOutcomeError(badRequest('Missing id'));
+    expect(normalizeDatabaseError(original)).toBe(original);
+  });
+
+  test('records the driver detail in the log for a transient failure', () => {
+    const err = Object.assign(new Error('terminating connection due to administrator command'), {
+      code: PostgresError.AdminShutdown,
+      severity: 'FATAL',
+    });
+
+    const result = normalizeDatabaseError(err);
+
+    expect(result.cause).toBe(err);
+    expect(warnSpy).toHaveBeenCalledWith(
+      'Database connection unavailable',
+      expect.objectContaining({
+        error: 'terminating connection due to administrator command',
+        code: PostgresError.AdminShutdown,
+        severity: 'FATAL',
+      })
+    );
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  test('records the driver detail in the log for an unclassified driver failure', () => {
+    const err = Object.assign(new Error('relation "ClientApplication" does not exist'), {
+      code: '42P01',
+      severity: 'ERROR',
+    });
+
+    const result = normalizeDatabaseError(err);
+
+    expect(result.cause).toBe(err);
+    expect(errorSpy).toHaveBeenCalledWith(
+      'Database error',
+      expect.objectContaining({
+        error: 'relation "ClientApplication" does not exist',
+        code: '42P01',
+      })
+    );
+  });
+});
+
+describe('isDatabaseConnectionError', () => {
+  test.each([
+    [
+      'pg FATAL 57P01 administrator termination',
+      Object.assign(new Error('terminating connection due to administrator command'), {
+        severity: 'FATAL',
+        code: PostgresError.AdminShutdown,
+        routine: 'ProcessInterrupts',
+      }),
+      true,
+    ],
+    ['pg PANIC severity', Object.assign(new Error('database system is shutting down'), { severity: 'PANIC' }), true],
+    ['pg 08006 connection failure', Object.assign(new Error('connection failure'), { code: '08006' }), true],
+    ['pg 53300 too many connections', Object.assign(new Error('too many clients already'), { code: '53300' }), true],
+    ['socket reset', { code: 'ECONNRESET' }, true],
+    ['connection refused', { code: 'ECONNREFUSED' }, true],
+    ['pg-pool connection terminated', new Error('Connection terminated unexpectedly'), true],
+    ['pg-pool unqueryable client', new Error('Client has encountered a connection error and is not queryable'), true],
+    ['pg-pool connect timeout', new Error('timeout exceeded when trying to connect'), true],
+    [
+      'pg ERROR 42P01 relation does not exist',
+      Object.assign(new Error('relation "ClientApplication" does not exist'), {
+        severity: 'ERROR',
+        code: '42P01',
+        routine: 'parserOpenTable',
+      }),
+      false,
+    ],
+    ['unrelated error', new Error('kaboom'), false],
+    ['undefined', undefined, false],
+    ['null', null, false],
+    ['string', 'some string', false],
+    ['empty object', {}, false],
+  ])('%s', (_name, err, expected) => {
+    expect(isDatabaseConnectionError(err)).toBe(expected);
   });
 });
 

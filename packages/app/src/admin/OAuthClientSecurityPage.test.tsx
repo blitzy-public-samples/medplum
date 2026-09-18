@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
+import { rem } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import type { WithId } from '@medplum/core';
 import { DEFAULT_SEARCH_COUNT } from '@medplum/core';
@@ -10,9 +11,18 @@ import { act, fireEvent, renderAppRoutes, screen, waitFor } from '../test-utils/
 const PROJECT_ID = '123';
 const EM_DASH = '—';
 const SKELETON_SELECTOR = '.mantine-Skeleton-root';
+const STATUS_BADGE_SELECTOR = '.mantine-Badge-root';
+const STATUS_BADGE_VARIANT = 'filled';
+const STATUS_LABEL_COLOR = 'var(--mantine-color-black)';
 const NAME_COLUMN_INDEX = 0;
-const REDIRECT_URI_COLUMN_INDEX = 1;
-const SECURITY_COLUMN_INDEX = 2;
+const SECURITY_COLUMN_INDEX = 1;
+const REDIRECT_URI_COLUMN_INDEX = 2;
+const DETAILS_COLUMN_INDEX = 3;
+const COLUMN_HEADERS = ['Name', 'Security', 'Redirect URIs', 'Details'];
+const SECURITY_RESERVATION_SELECTOR = '[data-testid="security-status"]';
+const DETAIL_LINK_TEXT = 'Review';
+const STATUS_BADGE_HEIGHT = 20;
+const WIDEST_STATUS_BADGE_WIDTH = 74;
 
 const EXACT_CLIENT_NAME = 'Exact Callback Client';
 const WILDCARD_CLIENT_NAME = 'Wildcard Client';
@@ -25,12 +35,25 @@ const REVIEWED_REDIRECT_URI = 'https://app.example.com/oauth/callback/reviewed';
 const LINT_ERROR_MESSAGE = 'Security review is unavailable';
 const MALFORMED_REPORT_MESSAGE = 'The OAuth client security review returned an unexpected response.';
 const UNRECOGNIZED_STATUS = 'completed';
+const FILTER_NOTICE_PATTERN = /column filter is applied/i;
+const SORT_PARAMETER = '_sort=name';
+const NAME_CONTAINS_PARAMETER = 'name%3Acontains=';
+const SEEDED_CLIENT_NAME = 'Seeded Callback Client';
+const OUT_OF_BAND_CLIENT_NAME = 'Out Of Band Client';
+const OUT_OF_BAND_REDIRECT_URI = 'https://out-of-band.example.com/oauth/callback';
 
 const DISPLAY_CLIENT_COUNT = 4;
 const SECOND_PAGE_CLIENT_COUNT = 2;
 const FILLER_CLIENT_COUNT = DEFAULT_SEARCH_COUNT + SECOND_PAGE_CLIENT_COUNT - DISPLAY_CLIENT_COUNT;
+const FILLER_CLIENT_NAME_PREFIX = 'Zz Filler Client ';
 
 type LintStatus = 'pass' | 'warning' | 'fail';
+
+const STATUS_BADGE_FILLS: Record<LintStatus, string> = {
+  pass: 'var(--mantine-color-green-6)',
+  warning: 'var(--mantine-color-orange-6)',
+  fail: 'var(--mantine-color-red-6)',
+};
 
 interface LintFinding {
   readonly ruleId: string;
@@ -155,6 +178,13 @@ function lintCallUrls(client: MockClient = medplum): string[] {
     .filter((url) => url.includes('/oauth-security'));
 }
 
+function searchCallUrls(client: MockClient = medplum): string[] {
+  return vi
+    .mocked(client.get)
+    .mock.calls.map((call) => String(call[0]))
+    .filter((url) => url.includes('/ClientApplication?'));
+}
+
 function getRow(name: string): HTMLTableRowElement {
   const row = screen.getByText(name).closest('tr');
   if (!row) {
@@ -183,6 +213,64 @@ function getCellText(name: string, columnIndex: number): string {
 
 function getSecurityCellText(name: string): string {
   return getCellText(name, SECURITY_COLUMN_INDEX);
+}
+
+/**
+ * Reads the status badge rendered in the security cell of the table row holding the given client name.
+ * @param name - The client name.
+ * @returns The badge element carrying the resolved severity colour.
+ */
+function getSecurityBadge(name: string): HTMLElement {
+  const badge = getCell(name, SECURITY_COLUMN_INDEX).querySelector<HTMLElement>(STATUS_BADGE_SELECTOR);
+  if (!badge) {
+    throw new Error(`No security badge found for "${name}"`);
+  }
+  return badge;
+}
+
+/**
+ * Asserts that one row's security badge renders the given status with the severity colour and label colour
+ * of that status.
+ * @param name - The client name.
+ * @param status - The security status the row must render.
+ * @returns The severity fill the badge resolved, so a caller can compare the fills of several rows.
+ */
+function expectSecurityBadge(name: string, status: LintStatus): string {
+  const badge = getSecurityBadge(name);
+  expect(badge).toHaveTextContent(status);
+  expect(badge).toHaveAttribute('data-variant', STATUS_BADGE_VARIANT);
+  expect(badge).toHaveStyle({ '--badge-bg': STATUS_BADGE_FILLS[status], color: STATUS_LABEL_COLOR });
+  return badge.style.getPropertyValue('--badge-bg');
+}
+
+/**
+ * Reads the size the security cell of one row reserves for its status, whatever state that status is in.
+ * @param name - The client name.
+ * @returns The reserved minimum width and height declared on the security cell container.
+ */
+function getSecurityReservedSize(name: string): { width: string; height: string } {
+  const reservation = getCell(name, SECURITY_COLUMN_INDEX).querySelector<HTMLElement>(SECURITY_RESERVATION_SELECTOR);
+  if (!reservation) {
+    throw new Error(`No security status container found for "${name}"`);
+  }
+  return { width: reservation.style.minWidth, height: reservation.style.minHeight };
+}
+
+/**
+ * Reads the detail-view link of the table row holding the given client name.
+ * @param name - The client name.
+ * @returns The anchor element the row's Details cell renders.
+ */
+function getDetailLink(name: string): HTMLAnchorElement {
+  const link = getCell(name, DETAILS_COLUMN_INDEX).querySelector('a');
+  if (!link) {
+    throw new Error(`No detail link found for "${name}"`);
+  }
+  return link;
+}
+
+function getColumnHeaders(): string[] {
+  return Array.from(document.querySelectorAll('thead tr:first-child th')).map((th) => th.textContent ?? '');
 }
 
 function getRedirectUriCellText(name: string): string {
@@ -228,6 +316,82 @@ async function setup(url = '/admin/oauth-security'): Promise<void> {
   renderAppRoutes(medplum, url);
 }
 
+/**
+ * Creates a client whose security review is stubbed the same way as the shared client's.
+ * @returns A client signed in as a project administrator, holding no OAuth clients yet.
+ */
+function createReviewerClient(): MockClient {
+  const reviewer = new MockClient();
+  reviewer.setActiveLoginOverride({
+    accessToken: '123',
+    refreshToken: '456',
+    profile: {
+      reference: 'Practitioner/124',
+    },
+    project: {
+      reference: `Project/${PROJECT_ID}`,
+    },
+  });
+  const reviewerOriginalGet = reviewer.get.bind(reviewer);
+  vi.spyOn(reviewer, 'get').mockImplementation((url, options) =>
+    url.toString().includes('/oauth-security')
+      ? (lintResponder(url.toString()) as any)
+      : reviewerOriginalGet(url, options)
+  );
+  vi.spyOn(reviewer, 'isProjectAdmin').mockImplementation(() => true);
+  vi.spyOn(reviewer, 'isSuperAdmin').mockImplementation(() => false);
+  return reviewer;
+}
+
+/**
+ * Finds the table header cell carrying the given column name.
+ * @param columnName - The column header text.
+ * @returns The element holding the header text, which opens the column menu when clicked.
+ */
+function getColumnHeader(columnName: string): HTMLElement {
+  const header = screen.getAllByText(columnName).find((element) => element.closest('th'));
+  if (!header) {
+    throw new Error(`No column header found for "${columnName}"`);
+  }
+  return header;
+}
+
+/**
+ * Applies a "contains" filter through the column header menu the table leaves available.
+ * @param columnName - The column header to filter on.
+ * @param value - The value the filter matches.
+ */
+async function applyContainsFilter(columnName: string, value: string): Promise<void> {
+  await act(async () => {
+    fireEvent.click(getColumnHeader(columnName));
+  });
+  await act(async () => {
+    fireEvent.click(await screen.findByText('Contains...'));
+  });
+  await act(async () => {
+    fireEvent.change(screen.getByPlaceholderText('Search value'), { target: { value } });
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByText('OK'));
+  });
+  await waitFor(() => {
+    expect(document.querySelector('.mantine-Modal-title')).toBeNull();
+  });
+}
+
+/**
+ * Clears every filter on one column through the column header menu.
+ * @param columnName - The column header whose filters are cleared.
+ */
+async function clearFilters(columnName: string): Promise<void> {
+  await act(async () => {
+    fireEvent.click(getColumnHeader(columnName));
+  });
+  await act(async () => {
+    fireEvent.click(await screen.findByText('Clear filters'));
+  });
+}
+
 describe('OAuthClientSecurityPage', () => {
   beforeAll(async () => {
     medplum.setActiveLoginOverride({
@@ -246,7 +410,7 @@ describe('OAuthClientSecurityPage', () => {
     await seedClient(LEGACY_CLIENT_NAME, 'warning', { redirectUri: LEGACY_REDIRECT_URI });
     await seedClient(NO_URI_CLIENT_NAME, 'pass');
     for (let i = 0; i < FILLER_CLIENT_COUNT; i++) {
-      await seedClient(`Filler Client ${i}`, 'pass', {
+      await seedClient(`${FILLER_CLIENT_NAME_PREFIX}${i}`, 'pass', {
         redirectUris: [`https://filler-${i}.example.com/oauth/callback`],
       });
     }
@@ -291,6 +455,22 @@ describe('OAuthClientSecurityPage', () => {
     expectSameIds(getRequestedIds(lintCallUrls()[0]), renderedClientIds());
     expect(medplum.get).toHaveBeenCalledWith(lintCallUrls()[0], { cache: 'no-cache' });
     expect(skeletonCount()).toBe(0);
+  });
+
+  test('Renders each security status with its own severity colour and a label colour legible on it', async () => {
+    await setup();
+
+    await waitFor(() => {
+      expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('pass');
+    });
+
+    const fills = [
+      expectSecurityBadge(EXACT_CLIENT_NAME, 'pass'),
+      expectSecurityBadge(LEGACY_CLIENT_NAME, 'warning'),
+      expectSecurityBadge(WILDCARD_CLIENT_NAME, 'fail'),
+    ];
+
+    expect(new Set(fills).size).toBe(fills.length);
   });
 
   test('Renders the redirect URIs of the search row until the security evaluation resolves, then those of the evaluation', async () => {
@@ -436,6 +616,211 @@ describe('OAuthClientSecurityPage', () => {
     }
     expect(skeletonCount()).toBe(0);
     expect(screen.queryByText(EXACT_CLIENT_NAME)).not.toBeInTheDocument();
+  });
+
+  describe('Client list search semantics', () => {
+    test('Requests the client list in a defined order', async () => {
+      await setup();
+
+      await waitFor(() => {
+        expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('pass');
+      });
+
+      const requestedSearches = searchCallUrls();
+      expect(requestedSearches.length).toBeGreaterThan(0);
+      for (const url of requestedSearches) {
+        expect(url).toContain(SORT_PARAMETER);
+      }
+
+      const names = renderedClientNames();
+      expect(names).toStrictEqual([...names].sort((a, b) => a.localeCompare(b)));
+    });
+
+    test('Keeps the defined order when the pagination control moves to the next page', async () => {
+      await setup();
+
+      await waitFor(() => {
+        expect(lintCallUrls()).toHaveLength(1);
+      });
+
+      expect(await screen.findByLabelText('Next page')).toBeInTheDocument();
+      await act(async () => {
+        fireEvent.click(screen.getByLabelText('Next page'));
+      });
+
+      await waitFor(() => {
+        expect(renderedClientNames()).toHaveLength(SECOND_PAGE_CLIENT_COUNT);
+      });
+
+      const nextPageSearch = searchCallUrls().at(-1) as string;
+      expect(nextPageSearch).toContain(SORT_PARAMETER);
+      expect(nextPageSearch).toContain('_offset=' + DEFAULT_SEARCH_COUNT);
+      const names = renderedClientNames();
+      expect(names).toStrictEqual([...names].sort((a, b) => a.localeCompare(b)));
+    });
+
+    test('Fetches the client list again when the review is reopened, so a client created elsewhere is listed', async () => {
+      lintResponder = () => Promise.resolve({ total: 0, offset: 0, count: DEFAULT_SEARCH_COUNT, results: [] });
+      const reviewer = createReviewerClient();
+      await reviewer.createResource<ClientApplication>({
+        resourceType: 'ClientApplication',
+        name: SEEDED_CLIENT_NAME,
+        redirectUris: [EXACT_REDIRECT_URI],
+        meta: { project: PROJECT_ID },
+      });
+
+      const firstVisit = renderAppRoutes(reviewer, '/admin/oauth-security');
+      expect(await screen.findByText(SEEDED_CLIENT_NAME)).toBeInTheDocument();
+      const searchesOnFirstVisit = searchCallUrls(reviewer).length;
+      expect(searchesOnFirstVisit).toBeGreaterThan(0);
+      firstVisit.unmount();
+
+      await reviewer.repo.createResource<ClientApplication>({
+        resourceType: 'ClientApplication',
+        name: OUT_OF_BAND_CLIENT_NAME,
+        redirectUris: [OUT_OF_BAND_REDIRECT_URI],
+        meta: { project: PROJECT_ID },
+      });
+
+      renderAppRoutes(reviewer, '/admin/oauth-security');
+
+      expect(await screen.findByText(OUT_OF_BAND_CLIENT_NAME)).toBeInTheDocument();
+      expect(screen.getByText(OUT_OF_BAND_REDIRECT_URI)).toBeInTheDocument();
+      expect(searchCallUrls(reviewer).length).toBeGreaterThan(searchesOnFirstVisit);
+    });
+
+    test('Discloses that a column filter is narrowing the review, and stops disclosing it once cleared', async () => {
+      await setup();
+
+      await waitFor(() => {
+        expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('pass');
+      });
+      expect(screen.queryByText(FILTER_NOTICE_PATTERN)).not.toBeInTheDocument();
+
+      await applyContainsFilter('Name', EXACT_CLIENT_NAME);
+
+      await waitFor(() => {
+        expect(renderedClientNames()).toStrictEqual([EXACT_CLIENT_NAME]);
+      });
+      expect(screen.getByText(FILTER_NOTICE_PATTERN)).toBeInTheDocument();
+      expect(searchCallUrls().at(-1)).toContain(NAME_CONTAINS_PARAMETER);
+
+      await clearFilters('Name');
+
+      await waitFor(() => {
+        expect(renderedClientNames()).toHaveLength(DEFAULT_SEARCH_COUNT);
+      });
+      expect(screen.queryByText(FILTER_NOTICE_PATTERN)).not.toBeInTheDocument();
+    });
+  });
+
+  describe('Table cell layout and row navigation', () => {
+    test('Places the security verdict in the column immediately after the client name', async () => {
+      await setup();
+
+      await waitFor(() => {
+        expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('pass');
+      });
+
+      expect(getColumnHeaders()).toStrictEqual(COLUMN_HEADERS);
+      expect(getCellText(EXACT_CLIENT_NAME, NAME_COLUMN_INDEX)).toBe(EXACT_CLIENT_NAME);
+      expect(getRedirectUriCellText(EXACT_CLIENT_NAME)).toBe(EXACT_REDIRECT_URI);
+    });
+
+    test('Renders every redirect URI so a long value breaks inside its cell', async () => {
+      await setup();
+
+      await waitFor(() => {
+        expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('pass');
+      });
+
+      for (const uri of [EXACT_REDIRECT_URI, WILDCARD_REDIRECT_URI, LEGACY_REDIRECT_URI]) {
+        expect(getComputedStyle(screen.getByText(uri)).overflowWrap).toBe('anywhere');
+      }
+    });
+
+    test('Reserves the same security column size while a status is loading, resolved and unavailable', async () => {
+      const deferred = createDeferred<LintReport>();
+      lintResponder = () => deferred.promise;
+
+      await setup();
+
+      await waitFor(() => {
+        expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('');
+      });
+
+      const reservedSize = getSecurityReservedSize(EXACT_CLIENT_NAME);
+      expect(reservedSize.width).not.toBe('');
+      expect(reservedSize.height).not.toBe('');
+      expect(getCell(EXACT_CLIENT_NAME, SECURITY_COLUMN_INDEX).querySelector(SKELETON_SELECTOR)).not.toBeNull();
+
+      const requestedIds = getRequestedIds(lintCallUrls()[0]);
+      await act(async () => {
+        deferred.resolve(buildReport(requestedIds.filter((id) => id !== idFor(NO_URI_CLIENT_NAME))));
+      });
+
+      await waitFor(() => {
+        expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('pass');
+      });
+
+      expect(getSecurityReservedSize(EXACT_CLIENT_NAME)).toStrictEqual(reservedSize);
+      expect(getSecurityCellText(LEGACY_CLIENT_NAME)).toBe('warning');
+      expect(getSecurityReservedSize(LEGACY_CLIENT_NAME)).toStrictEqual(reservedSize);
+      expect(getSecurityCellText(NO_URI_CLIENT_NAME)).toBe(EM_DASH);
+      expect(getSecurityReservedSize(NO_URI_CLIENT_NAME)).toStrictEqual(reservedSize);
+      expect(skeletonCount()).toBe(0);
+    });
+
+    test('Sizes the loading placeholder to the widest settled status badge', async () => {
+      const deferred = createDeferred<LintReport>();
+      lintResponder = () => deferred.promise;
+
+      await setup();
+
+      await waitFor(() => {
+        expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('');
+      });
+
+      const placeholder = getCell(EXACT_CLIENT_NAME, SECURITY_COLUMN_INDEX).querySelector<HTMLElement>(
+        SKELETON_SELECTOR
+      );
+      expect(placeholder?.style.getPropertyValue('--skeleton-height')).toBe(rem(STATUS_BADGE_HEIGHT));
+      expect(placeholder?.style.getPropertyValue('--skeleton-width')).toBe(rem(WIDEST_STATUS_BADGE_WIDTH));
+
+      await act(async () => {
+        deferred.resolve(buildReport(getRequestedIds(lintCallUrls()[0])));
+      });
+
+      await waitFor(() => {
+        expect(skeletonCount()).toBe(0);
+      });
+    });
+
+    test('Gives every row a keyboard-focusable link to the security detail view of its client', async () => {
+      await setup();
+
+      await waitFor(() => {
+        expect(getSecurityCellText(WILDCARD_CLIENT_NAME)).toBe('fail');
+      });
+
+      const detailLinks = screen.getAllByRole('link', { name: new RegExp(`^${DETAIL_LINK_TEXT} `) });
+      expect(detailLinks).toHaveLength(renderedClientNames().length);
+
+      const link = getDetailLink(WILDCARD_CLIENT_NAME);
+      expect(link).toHaveAttribute('href', `/admin/oauth-security/${idFor(WILDCARD_CLIENT_NAME)}`);
+      expect(link).toHaveAccessibleName(`${DETAIL_LINK_TEXT} ${WILDCARD_CLIENT_NAME}`);
+
+      link.focus();
+      expect(link).toHaveFocus();
+
+      await act(async () => {
+        fireEvent.click(link);
+      });
+
+      expect(await screen.findByRole('heading', { name: WILDCARD_CLIENT_NAME })).toBeInTheDocument();
+      expect(screen.getByText('Back to OAuth Security')).toBeInTheDocument();
+      expect(lintCallUrls()[1]).toContain('_id=' + idFor(WILDCARD_CLIENT_NAME));
+    });
   });
 
   describe('Security status settling', () => {
@@ -605,6 +990,81 @@ describe('OAuthClientSecurityPage', () => {
       expect(getRedirectUriCellText(EXACT_CLIENT_NAME)).toBe(EXACT_REDIRECT_URI);
       expect(getRedirectUriCellText(LEGACY_CLIENT_NAME)).toBe(LEGACY_REDIRECT_URI);
       expect(getRedirectUriCellText(NO_URI_CLIENT_NAME)).toBe(EM_DASH);
+      expect(skeletonCount()).toBe(0);
+    });
+
+    test('The failure notification offers a close button with an accessible name', async () => {
+      const deferred = createDeferred<LintReport>();
+      lintResponder = () => deferred.promise;
+
+      await setup();
+
+      await waitFor(() => {
+        expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('');
+      });
+
+      await act(async () => {
+        deferred.reject(new Error(LINT_ERROR_MESSAGE));
+      });
+
+      expect(await screen.findByText(LINT_ERROR_MESSAGE)).toBeInTheDocument();
+      const dismissButton = screen.getByRole('button', { name: 'Dismiss' });
+      expect(dismissButton).toBeInTheDocument();
+      expect(dismissButton.closest('.mantine-Notification-root')).not.toBeNull();
+
+      await act(async () => {
+        fireEvent.click(dismissButton);
+      });
+
+      await waitFor(() => {
+        expect(screen.queryByText(LINT_ERROR_MESSAGE)).not.toBeInTheDocument();
+      });
+    });
+
+    test('A rejected security response for a previous page neither overwrites the current page nor notifies', async () => {
+      const deferreds: Deferred<LintReport>[] = [];
+      lintResponder = () => {
+        const deferred = createDeferred<LintReport>();
+        deferreds.push(deferred);
+        return deferred.promise;
+      };
+
+      await setup();
+
+      await waitFor(() => {
+        expect(lintCallUrls()).toHaveLength(1);
+      });
+
+      expect(await screen.findByLabelText('Next page')).toBeInTheDocument();
+      await act(async () => {
+        fireEvent.click(screen.getByLabelText('Next page'));
+      });
+
+      await waitFor(() => {
+        expect(lintCallUrls()).toHaveLength(2);
+      });
+      await waitFor(() => {
+        expect(renderedClientNames()).toHaveLength(SECOND_PAGE_CLIENT_COUNT);
+      });
+
+      const nextPageNames = renderedClientNames();
+      await act(async () => {
+        deferreds[1].resolve(buildReport(getRequestedIds(lintCallUrls()[1]), 'warning'));
+      });
+
+      await waitFor(() => {
+        expect(getSecurityCellText(nextPageNames[0])).toBe('warning');
+      });
+
+      await act(async () => {
+        deferreds[0].reject(new Error(LINT_ERROR_MESSAGE));
+      });
+
+      for (const name of nextPageNames) {
+        expect(getSecurityCellText(name)).toBe('warning');
+      }
+      expect(screen.queryByText(LINT_ERROR_MESSAGE)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Dismiss' })).not.toBeInTheDocument();
       expect(skeletonCount()).toBe(0);
     });
   });

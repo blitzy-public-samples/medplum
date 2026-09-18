@@ -6,6 +6,12 @@ import { IconAlertCircle } from '@tabler/icons-react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { Component } from 'react';
 
+/**
+ * Title colour of the error alert.
+ * Contract: at least 4.5:1 against the alert's red light-variant fill in both colour schemes.
+ */
+const ALERT_TITLE_COLOR = 'light-dark(var(--mantine-color-red-9), var(--mantine-color-red-2))';
+
 export interface ErrorBoundaryProps {
   readonly children: ReactNode;
 }
@@ -60,7 +66,12 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   render(): ReactNode {
     if (this.state.error) {
       return (
-        <Alert icon={<IconAlertCircle size={16} />} title="Something went wrong" color="red">
+        <Alert
+          icon={<IconAlertCircle size={16} />}
+          title="Something went wrong"
+          color="red"
+          styles={{ title: { color: ALERT_TITLE_COLOR } }}
+        >
           {normalizeErrorString(this.state.error)}
         </Alert>
       );

@@ -12,7 +12,17 @@ import {
   prepareDatabasePoolsForShutdown,
   releaseAdvisoryLock,
 } from './database';
+import { isDatabaseConnectionError } from './fhir/sql';
 import { globalLogger } from './logger';
+
+const pgFatalConnectionTerminatedError = Object.assign(
+  new Error('terminating connection due to administrator command'),
+  {
+    severity: 'FATAL',
+    code: '57P01',
+    routine: 'ProcessInterrupts',
+  }
+);
 
 describe('Advisory locks', () => {
   let clientA: PoolClient;
@@ -144,5 +154,55 @@ describe('prepareDatabasePoolsForShutdown', () => {
     expect(() => activeClient.release()).not.toThrow();
     expect(pool.idleCount).toBe(0);
     expect(pool.totalCount).toBe(0);
+  });
+});
+
+describe('Pooled client error containment', () => {
+  beforeEach(async () => {
+    await initDatabase(await loadTestConfig());
+  });
+
+  afterEach(async () => {
+    await closeDatabase();
+  });
+
+  test('Checked-out client error is logged instead of thrown', async () => {
+    const pool = getDatabasePool(DatabaseMode.WRITER);
+    const client = await pool.connect();
+    const errorSpy = vi.spyOn(globalLogger, 'error').mockImplementation(() => undefined);
+
+    try {
+      expect(client.listenerCount('error')).toBe(1);
+      expect(() => client.emit('error', pgFatalConnectionTerminatedError)).not.toThrow();
+      expect(errorSpy).toHaveBeenCalledWith('Database client error', pgFatalConnectionTerminatedError);
+    } finally {
+      errorSpy.mockRestore();
+      client.release();
+    }
+  });
+
+  test('Connection loss on a checked-out client is contained and the pool recovers', async () => {
+    const pool = getDatabasePool(DatabaseMode.WRITER);
+    const client = await pool.connect();
+    await client.query('SELECT 1');
+    const errorSpy = vi.spyOn(globalLogger, 'error').mockImplementation(() => undefined);
+
+    try {
+      const clientInternals = client as unknown as { connection: { stream: { destroy: () => void } } };
+      clientInternals.connection.stream.destroy();
+
+      for (let i = 0; i < 50 && errorSpy.mock.calls.length === 0; i++) {
+        await sleep(20);
+      }
+
+      expect(errorSpy).toHaveBeenCalledWith('Database client error', expect.any(Error));
+      expect(isDatabaseConnectionError(errorSpy.mock.calls[0][1])).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+      client.release(new Error('Connection lost'));
+    }
+
+    const result = await pool.query<{ ok: number }>('SELECT 1 AS ok');
+    expect(result.rows[0].ok).toBe(1);
   });
 });

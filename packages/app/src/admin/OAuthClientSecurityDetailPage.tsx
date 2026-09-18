@@ -48,19 +48,25 @@ const NOT_VISIBLE_STATE: OAuthClientLintDetailState = { kind: 'not-visible' };
 
 const MALFORMED_REPORT_MESSAGE = 'The OAuth client security report could not be read.';
 
-const FAIL_CLOSED_COLOR = 'red';
+const INVALID_CLIENT_ID_OUTCOME: OperationOutcome = normalizeOperationOutcome(new Error('Invalid OAuth client id.'));
+
+const STATUS_LABEL_PREFIX = 'Security status: ';
 
 const BADGE_COLORS = {
-  pass: 'green',
-  warning: 'orange',
-  fail: 'red',
+  pass: 'green.6',
+  warning: 'orange.6',
+  fail: 'red.6',
 } as const;
+
+const BADGE_VARIANT = 'filled';
 
 const ALERT_COLORS = {
   pass: 'green',
   warning: 'yellow',
   fail: 'red',
 } as const;
+
+const SEVERITY_TEXT_COLOR = 'black';
 
 function isLintStatus(value: unknown): value is OAuthClientLintStatus {
   return value === 'pass' || value === 'warning' || value === 'fail';
@@ -91,7 +97,7 @@ function isLintResult(value: unknown): value is OAuthClientLintResult {
 }
 
 function getStatusColor(colors: Record<OAuthClientLintStatus, string>, status: string): string {
-  return isLintStatus(status) ? colors[status] : FAIL_CLOSED_COLOR;
+  return isLintStatus(status) ? colors[status] : colors.fail;
 }
 
 function getMalformedReportState(): OAuthClientLintDetailState {
@@ -123,6 +129,12 @@ function toDetailState(payload: unknown, clientId: string): OAuthClientLintDetai
   return { kind: 'loaded', result };
 }
 
+const FINDING_URI_STYLE = { overflowWrap: 'anywhere' } as const;
+
+const FINDING_ALERT_STYLES = { body: { minWidth: 0 }, message: { minWidth: 0 } } as const;
+
+const CLIENT_HEADING_STYLE = { overflowWrap: 'anywhere', minWidth: 0 } as const;
+
 function BackLink(): JSX.Element {
   return <MedplumLink to={LIST_PATH}>Back to OAuth Security</MedplumLink>;
 }
@@ -131,18 +143,45 @@ function NotVisibleMessage(): JSX.Element {
   return (
     <>
       <BackLink />
-      <Text c="dimmed" mt="md">
+      <Text c="dimmed" size="sm" mt="md">
         This OAuth client is not visible in this project.
       </Text>
     </>
   );
 }
 
+/**
+ * Renders an operation outcome beside the back link.
+ * @param props - The component props.
+ * @param props.outcome - The operation outcome describing why no report is shown.
+ * @returns The back link followed by the outcome alert.
+ */
+function OutcomeMessage({ outcome }: { readonly outcome: OperationOutcome }): JSX.Element {
+  return (
+    <>
+      <BackLink />
+      <OperationOutcomeAlert outcome={outcome} mt="md" />
+    </>
+  );
+}
+
+/**
+ * Renders one security finding as an Alert titled with the rule that produced it.
+ * @param props - The component props.
+ * @param props.finding - The finding to render, with its offending redirect URI when it names one.
+ * @returns The finding's redirect URI, reason and remediation inside a severity coloured Alert.
+ */
 function FindingAlert({ finding }: { readonly finding: OAuthClientLintFinding }): JSX.Element {
   return (
-    <Alert color={getStatusColor(ALERT_COLORS, finding.status)} title={finding.ruleId}>
+    <Alert
+      color={getStatusColor(ALERT_COLORS, finding.status)}
+      c={SEVERITY_TEXT_COLOR}
+      title={finding.ruleId}
+      role="region"
+      styles={FINDING_ALERT_STYLES}
+    >
       {finding.redirectUri && (
-        <Text size="sm" fw={500}>
+        <Text size="sm" fw={500} style={FINDING_URI_STYLE}>
           {finding.redirectUri}
         </Text>
       )}
@@ -184,12 +223,7 @@ function OAuthClientSecurityDetail({ clientId }: { readonly clientId: string }):
   }
 
   if (state.kind === 'error') {
-    return (
-      <>
-        <BackLink />
-        <OperationOutcomeAlert outcome={state.outcome} mt="md" />
-      </>
-    );
+    return <OutcomeMessage outcome={state.outcome} />;
   }
 
   if (state.kind === 'not-visible') {
@@ -202,18 +236,26 @@ function OAuthClientSecurityDetail({ clientId }: { readonly clientId: string }):
   return (
     <>
       <Group justify="space-between" mb="md">
-        <Title order={4}>{result.name || result.id}</Title>
-        <StatusBadge status={result.status} color={getStatusColor(BADGE_COLORS, result.status)} variant="light" />
+        <Title order={4} style={CLIENT_HEADING_STYLE}>
+          {result.name || result.id}
+        </Title>
+        <StatusBadge
+          status={result.status}
+          color={getStatusColor(BADGE_COLORS, result.status)}
+          variant={BADGE_VARIANT}
+          c={SEVERITY_TEXT_COLOR}
+          aria-label={STATUS_LABEL_PREFIX + result.status}
+        />
       </Group>
       <BackLink />
       {findings.length === 0 ? (
-        <Text c="dimmed" mt="md">
+        <Text c="dimmed" size="sm" mt="md">
           No risky patterns detected.
         </Text>
       ) : (
-        <Stack gap="md" mt="md">
-          {findings.map((finding) => (
-            <FindingAlert key={finding.ruleId + '|' + (finding.redirectUri ?? '')} finding={finding} />
+        <Stack gap="sm" mt="md">
+          {findings.map((finding, index) => (
+            <FindingAlert key={finding.ruleId + '|' + (finding.redirectUri ?? '') + '|' + index} finding={finding} />
           ))}
         </Stack>
       )}
@@ -224,13 +266,14 @@ function OAuthClientSecurityDetail({ clientId }: { readonly clientId: string }):
 /**
  * Read-only detail view for one OAuth client application of the current project.
  * @returns Each finding the client security report returned, with its reason, its suggested fix and the
- * redirect URI that triggered it when the finding names one.
+ * redirect URI that triggered it when the finding names one, or the invalid client id outcome for a route
+ * parameter that is not a client application id.
  */
 export function OAuthClientSecurityDetailPage(): JSX.Element {
   const { clientId } = useParams() as { clientId: string };
 
   if (!isUUID(clientId)) {
-    return <NotVisibleMessage />;
+    return <OutcomeMessage outcome={INVALID_CLIENT_ID_OUTCOME} />;
   }
 
   return <OAuthClientSecurityDetail key={clientId} clientId={clientId} />;

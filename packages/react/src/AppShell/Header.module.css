@@ -22,6 +22,37 @@
   }
 }
 
+.skipLink {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  font-size: var(--mantine-font-size-sm);
+
+  &:focus {
+    z-index: var(--mantine-z-index-app);
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip-path: none;
+    padding: var(--mantine-spacing-xs) var(--mantine-spacing-sm);
+    border-radius: var(--mantine-radius-default);
+    background-color: var(--mantine-color-body);
+  }
+}
+
+.headerStart {
+  min-width: 0;
+}
+
+.search {
+  min-width: 0;
+}
+
 .userInfo {
   margin-right: 3px;
   min-width: 0;
@@ -39,4 +70,9 @@
 
 .userProject {
   line-height: 1.2;
+  color: light-dark(var(--mantine-color-gray-7), var(--mantine-color-dark-1));
+}
+
+.avatarPlaceholder {
+  color: light-dark(var(--mantine-color-gray-7), var(--mantine-color-dark-1));
 }

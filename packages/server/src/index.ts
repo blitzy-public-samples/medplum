@@ -5,6 +5,7 @@ import gracefulShutdown from 'http-graceful-shutdown';
 import { initApp, shutdownApp } from './app';
 import { loadConfig } from './config/loader';
 import { prepareDatabasePoolsForShutdown } from './database';
+import { isDatabaseConnectionError } from './fhir/sql';
 import { exitAfterStdoutDrain, globalLogger } from './logger';
 import { getServerVersion } from './util/version';
 
@@ -27,6 +28,10 @@ export async function main(configName: string): Promise<void> {
       // Workaround for OpenTelemetry bug: https://github.com/open-telemetry/opentelemetry-js/issues/5095
       // The otel library can throw this error on malformed X-Forwarded-For headers.
       // We do *not* want to exit the process in this case.
+      return;
+    }
+
+    if (isDatabaseConnectionError(err)) {
       return;
     }
 

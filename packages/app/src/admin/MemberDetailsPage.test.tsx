@@ -7,6 +7,18 @@ import { within } from '@testing-library/react';
 import { act, fireEvent, renderAppRoutes, screen, waitFor } from '../test-utils/render';
 
 describe('MemberDetailsPage', () => {
+  /**
+   * Renders the app routes at the given URL inside `act`, so that the state updates the
+   * page's initial data fetches schedule are applied before the test asserts.
+   * @param medplum - The Medplum client the render is backed by.
+   * @param url - The initial URL to render.
+   */
+  async function renderPage(medplum: MockClient, url: string): Promise<void> {
+    await act(async () => {
+      renderAppRoutes(medplum, url);
+    });
+  }
+
   function createMedplum(admin = false): MockClient {
     const medplum = new MockClient();
     medplum.setActiveLoginOverride({
@@ -48,7 +60,7 @@ describe('MemberDetailsPage', () => {
       profile: { reference: `Practitioner/${practitioner.id}` },
     });
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     expect(await screen.findByText('User Details')).toBeInTheDocument();
     expect(screen.getByText('Go to User (change login email)')).toBeInTheDocument();
@@ -76,7 +88,7 @@ describe('MemberDetailsPage', () => {
       profile: { reference: `Practitioner/${practitioner.id}` },
     });
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     expect(await screen.findByText('User Details')).toBeInTheDocument();
     expect(screen.getByText('This User is server-scoped and cannot be viewed in this project.')).toBeInTheDocument();
@@ -97,7 +109,7 @@ describe('MemberDetailsPage', () => {
       profile: { reference: `Bot/${bot.id}` },
     });
 
-    renderAppRoutes(medplum, `/admin/bots/${membership.id}`);
+    await renderPage(medplum, `/admin/bots/${membership.id}`);
 
     expect(await screen.findByText('ProjectMembership Details')).toBeInTheDocument();
     expect(screen.queryByText('User Details')).not.toBeInTheDocument();
@@ -126,7 +138,7 @@ describe('MemberDetailsPage', () => {
       profile: { reference: `Practitioner/${practitioner.id}` },
     });
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     expect(await screen.findByText('ProjectMembership Details')).toBeInTheDocument();
     expect(screen.getByText('Go to ProjectMembership')).toBeInTheDocument();
@@ -157,7 +169,7 @@ describe('MemberDetailsPage', () => {
       profile: { reference: `Practitioner/${practitioner.id}` },
     });
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     expect(await screen.findByText('Remove user')).toBeInTheDocument();
   });
@@ -185,7 +197,7 @@ describe('MemberDetailsPage', () => {
       profile: { reference: `Practitioner/${practitioner.id}` },
     });
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     expect(await screen.findByText('ProjectMembership Details')).toBeInTheDocument();
     expect(screen.queryByText('Remove user')).not.toBeInTheDocument();
@@ -215,7 +227,7 @@ describe('MemberDetailsPage', () => {
       profile: { reference: `Practitioner/${practitioner.id}` },
     });
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     expect(await screen.findByText('Remove user')).toBeInTheDocument();
 
@@ -256,7 +268,7 @@ describe('MemberDetailsPage', () => {
       profile: { reference: `Practitioner/${practitioner.id}` },
     });
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     expect(await screen.findByText('Remove user')).toBeInTheDocument();
 
@@ -295,7 +307,7 @@ describe('MemberDetailsPage', () => {
     const medplum = createMedplum(true);
     const membership = await setupMember(medplum, { mfaEnrolled: true, mfaMethod: ['totp', 'email'] });
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     expect(await screen.findByText('Account Security')).toBeInTheDocument();
     expect(screen.getByText('Authenticator app (TOTP)')).toBeInTheDocument();
@@ -307,7 +319,7 @@ describe('MemberDetailsPage', () => {
     const medplum = createMedplum(true);
     const membership = await setupMember(medplum, { mfaEnrolled: true, mfaMethod: undefined });
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     expect(await screen.findByText('Account Security')).toBeInTheDocument();
     expect(screen.getByText('Authenticator app (TOTP)')).toBeInTheDocument();
@@ -318,7 +330,7 @@ describe('MemberDetailsPage', () => {
     const medplum = createMedplum(true);
     const membership = await setupMember(medplum, { mfaRequired: true });
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     expect(await screen.findByText('Account Security')).toBeInTheDocument();
     expect(screen.getByText('Required')).toBeInTheDocument();
@@ -328,7 +340,7 @@ describe('MemberDetailsPage', () => {
     const medplum = createMedplum(true);
     const membership = await setupMember(medplum, { email: undefined });
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     expect(await screen.findByText('Account Security')).toBeInTheDocument();
     expect(
@@ -342,7 +354,7 @@ describe('MemberDetailsPage', () => {
     const medplum = createMedplum(true);
     const membership = await setupMember(medplum, { mfaEnrolled: true, mfaMethod: ['email'] });
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     const resetButton = await screen.findByRole('button', { name: 'Reset MFA' });
     await act(async () => {
@@ -358,7 +370,7 @@ describe('MemberDetailsPage', () => {
     const medplum = createMedplum(false);
     const membership = await setupMember(medplum, { mfaEnrolled: true, mfaMethod: ['totp'] });
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     expect(await screen.findByText('ProjectMembership Details')).toBeInTheDocument();
     expect(screen.queryByText('Account Security')).not.toBeInTheDocument();
@@ -368,7 +380,7 @@ describe('MemberDetailsPage', () => {
     const medplum = createMedplum(true);
     const membership = await setupMember(medplum);
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     expect(await screen.findByText('Account Security')).toBeInTheDocument();
     expect(screen.getByText('Not enrolled')).toBeInTheDocument();
@@ -379,7 +391,7 @@ describe('MemberDetailsPage', () => {
     const medplum = createMedplum(true);
     const membership = await setupMember(medplum, { mfaEnrolled: true, mfaMethod: ['totp'] });
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     const resetButton = await screen.findByRole('button', { name: 'Reset MFA' });
     const postSpy = vi.spyOn(medplum, 'post').mockResolvedValue({ resourceType: 'OperationOutcome', issue: [] });
@@ -403,7 +415,7 @@ describe('MemberDetailsPage', () => {
     const medplum = createMedplum(true);
     const membership = await setupMember(medplum);
 
-    renderAppRoutes(medplum, `/admin/users/${membership.id}`);
+    await renderPage(medplum, `/admin/users/${membership.id}`);
 
     const sendButton = await screen.findByRole('button', { name: 'Send password reset email' });
     const postSpy = vi.spyOn(medplum, 'post').mockResolvedValue({ resourceType: 'OperationOutcome', issue: [] });

@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Group, SegmentedControl, Text, VisuallyHidden } from '@mantine/core';
+import { Box, Group, SegmentedControl, Text, VisuallyHidden } from '@mantine/core';
 import type { SearchRequest } from '@medplum/core';
 import { Operator } from '@medplum/core';
-import type { Bundle, ProjectMembership, Resource, User } from '@medplum/fhirtypes';
+import type { ProjectMembership, Resource, User } from '@medplum/fhirtypes';
 import type { SearchControlAdditionalColumn, SearchLoadEvent } from '@medplum/react';
 import { SearchControl, useMedplum } from '@medplum/react';
 import { IconCheck, IconX } from '@tabler/icons-react';
@@ -71,9 +71,10 @@ export function MemberTable(props: MemberTableProps): JSX.Element {
       .catch(() => setAllowedMfaMethods(undefined));
   }, [medplum, projectId, showMfaEnrollment]);
 
-  // After each search load, batch-read the member Users so the enrollment columns can
-  // reflect each member's enrolled factors. Users the admin cannot read (e.g.
-  // server-scoped users) are omitted from the batch and render as unknown ("—").
+  // Takes the loaded search response and resolves the member Users it references into
+  // `memberUsers`, keyed by user id, so the enrollment columns can reflect each member's
+  // enrolled factors. Users the caller's access policy does not expose are absent from the
+  // result and render as unknown ("—").
   const handleLoad = useCallback(
     (e: SearchLoadEvent): void => {
       if (!showMfaEnrollment) {
@@ -91,20 +92,12 @@ export function MemberTable(props: MemberTableProps): JSX.Element {
         setMemberUsers({});
         return;
       }
-      const bundle: Bundle = {
-        resourceType: 'Bundle',
-        type: 'batch',
-        entry: ids.map((id) => ({ request: { method: 'GET', url: `User/${id}` } })),
-      };
       medplum
-        .executeBatch(bundle)
+        .searchResources('User', { _id: ids.join(','), _count: ids.length }, { cache: 'no-cache' })
         .then((result) => {
           const users: Record<string, User> = {};
-          for (const entry of result.entry ?? []) {
-            const resource = entry.resource;
-            if (resource?.resourceType === 'User' && resource.id) {
-              users[resource.id] = resource;
-            }
+          for (const resource of result) {
+            users[resource.id] = resource;
           }
           setMemberUsers(users);
         })
@@ -124,7 +117,7 @@ export function MemberTable(props: MemberTableProps): JSX.Element {
           const userId = getMemberUserId(resource);
           const user = userId ? memberUsers[userId] : undefined;
           return user?.project ? (
-            <>
+            <Box component="span" pos="relative">
               <IconCheck
                 size={STATUS_ICON_SIZE}
                 color="var(--mantine-color-blue-6)"
@@ -132,9 +125,9 @@ export function MemberTable(props: MemberTableProps): JSX.Element {
                 aria-hidden="true"
               />
               <VisuallyHidden>Project-scoped</VisuallyHidden>
-            </>
+            </Box>
           ) : (
-            <>
+            <Box component="span" pos="relative">
               <IconX
                 size={STATUS_ICON_SIZE}
                 color="var(--mantine-color-gray-6)"
@@ -142,7 +135,7 @@ export function MemberTable(props: MemberTableProps): JSX.Element {
                 aria-hidden="true"
               />
               <VisuallyHidden>Not project-scoped</VisuallyHidden>
-            </>
+            </Box>
           );
         },
       },
@@ -164,7 +157,7 @@ export function MemberTable(props: MemberTableProps): JSX.Element {
                 );
               }
               return getEnrolledMfaMethods(user).includes(method) ? (
-                <>
+                <Box component="span" pos="relative">
                   <IconCheck
                     size={STATUS_ICON_SIZE}
                     color="var(--mantine-color-blue-6)"
@@ -172,9 +165,9 @@ export function MemberTable(props: MemberTableProps): JSX.Element {
                     aria-hidden="true"
                   />
                   <VisuallyHidden>Enrolled</VisuallyHidden>
-                </>
+                </Box>
               ) : (
-                <>
+                <Box component="span" pos="relative">
                   <IconX
                     size={STATUS_ICON_SIZE}
                     color="var(--mantine-color-gray-6)"
@@ -182,7 +175,7 @@ export function MemberTable(props: MemberTableProps): JSX.Element {
                     aria-hidden="true"
                   />
                   <VisuallyHidden>Not enrolled</VisuallyHidden>
-                </>
+                </Box>
               );
             },
           }))
@@ -218,8 +211,8 @@ export function MemberTable(props: MemberTableProps): JSX.Element {
   return (
     <>
       {showToolbar && (
-        <Group justify="space-between" align="center" mb="md" wrap="nowrap">
-          <Group gap="md" wrap="nowrap">
+        <Group justify="space-between" align="center" mb="md">
+          <Group gap="md">
             {showSegmentedControl && (
               <SegmentedControl
                 value={profileType}

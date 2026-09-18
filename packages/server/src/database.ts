@@ -96,6 +96,12 @@ async function initPool(config: MedplumDatabaseConfig, proxyEndpoint: string | u
     globalLogger.error('Database connection error', err);
   });
 
+  pool.on('connect', (client) => {
+    client.on('error', (err) => {
+      globalLogger.error('Database client error', err);
+    });
+  });
+
   return pool;
 }
 

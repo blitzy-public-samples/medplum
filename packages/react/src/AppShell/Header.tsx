@@ -1,10 +1,20 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Box, Group, AppShell as MantineAppShell, Menu, Stack, Text, UnstyledButton } from '@mantine/core';
+import {
+  Anchor,
+  Box,
+  Group,
+  AppShell as MantineAppShell,
+  Menu,
+  Stack,
+  Text,
+  UnstyledButton,
+  VisuallyHidden,
+} from '@mantine/core';
 import { formatHumanName } from '@medplum/core';
 import { useMedplum, useMedplumProfile } from '@medplum/react-hooks';
 import { IconChevronDown } from '@tabler/icons-react';
-import type { JSX, ReactNode } from 'react';
+import type { JSX, MouseEvent, ReactNode } from 'react';
 import { useState } from 'react';
 import { ResourceAvatar } from '../ResourceAvatar/ResourceAvatar';
 import type { AppShellAnnouncement } from './AnnouncementBanners';
@@ -13,6 +23,25 @@ import classes from './Header.module.css';
 import { HeaderDropdown } from './HeaderDropdown';
 import headerDropdownClasses from './HeaderDropdown.module.css';
 import { HeaderSearchInput } from './HeaderSearchInput';
+
+/**
+ * The DOM id of the app shell main content region, and the target of the header skip link.
+ * `AppShell` assigns this id to `AppShell.Main`.
+ */
+const MAIN_CONTENT_ID = 'medplum-main-content';
+
+/**
+ * Moves keyboard focus to the app shell main content region.
+ * Falls back to default anchor navigation when the region is not present.
+ * @param event - The skip link click event.
+ */
+function focusMainContent(event: MouseEvent<HTMLAnchorElement>): void {
+  const mainContent = document.getElementById(MAIN_CONTENT_ID);
+  if (mainContent) {
+    event.preventDefault();
+    mainContent.focus();
+  }
+}
 
 export interface HeaderProps {
   readonly pathname?: string;
@@ -34,10 +63,13 @@ export function Header(props: HeaderProps): JSX.Element {
   const projectDisplay = medplum.getProject()?.name ?? medplum.getActiveLogin()?.project.display;
 
   return (
-    <MantineAppShell.Header p={0} style={{ zIndex: 101 }}>
+    <MantineAppShell.Header p={0} style={{ zIndex: 101 }} aria-label="Application header">
       <Box p={8} h={60}>
-        <Group justify="space-between">
-          <Group gap="xs">
+        <Anchor href={`#${MAIN_CONTENT_ID}`} className={classes.skipLink} onClick={focusMainContent}>
+          Skip to main content
+        </Anchor>
+        <Group justify="space-between" wrap="nowrap">
+          <Group gap="xs" wrap="nowrap" className={classes.headerStart}>
             <UnstyledButton
               className={classes.logoButton}
               aria-expanded={props.navbarOpen}
@@ -47,10 +79,12 @@ export function Header(props: HeaderProps): JSX.Element {
               {props.logo}
             </UnstyledButton>
             {!props.headerSearchDisabled && (
-              <HeaderSearchInput pathname={props.pathname} searchParams={props.searchParams} />
+              <Box role="search" aria-label="Search patients and orders" className={classes.search}>
+                <HeaderSearchInput pathname={props.pathname} searchParams={props.searchParams} />
+              </Box>
             )}
           </Group>
-          <Group gap="lg" pr="sm">
+          <Group gap="lg" pr="sm" wrap="nowrap">
             {props.notifications}
             <Menu
               width={260}
@@ -64,24 +98,29 @@ export function Header(props: HeaderProps): JSX.Element {
               <Menu.Target>
                 <UnstyledButton
                   className={classes.user}
-                  aria-label="User menu"
                   data-active={userMenuOpened || undefined}
                   onClick={() => setUserMenuOpened((o) => !o)}
                 >
-                  <Group gap={7}>
-                    <ResourceAvatar value={profile} radius="xl" size={24} />
+                  <Group gap={7} wrap="nowrap">
+                    <ResourceAvatar
+                      value={profile}
+                      radius="xl"
+                      size={24}
+                      classNames={{ placeholder: classes.avatarPlaceholder }}
+                    />
                     <Stack gap={0} className={classes.userInfo}>
                       <Text size="sm" className={classes.userName} truncate>
                         {formatHumanName(profile?.name?.[0])}
                       </Text>
                       {projectDisplay && (
-                        <Text size="xs" c="dimmed" className={classes.userProject} title={projectDisplay} truncate>
+                        <Text size="xs" className={classes.userProject} title={projectDisplay} truncate>
                           {projectDisplay}
                         </Text>
                       )}
                     </Stack>
                     <IconChevronDown size={12} stroke={1.5} />
                   </Group>
+                  <VisuallyHidden>User menu</VisuallyHidden>
                 </UnstyledButton>
               </Menu.Target>
               <Menu.Dropdown className={headerDropdownClasses.dropdown}>

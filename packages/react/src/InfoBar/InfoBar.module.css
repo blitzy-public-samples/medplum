@@ -11,7 +11,7 @@
 }
 
 .key {
-  color: var(--mantine-color-gray-6);
+  color: light-dark(var(--mantine-color-gray-7), var(--mantine-color-dark-1));
   text-transform: uppercase;
   font-size: var(--mantine-font-size-xs);
   white-space: nowrap;

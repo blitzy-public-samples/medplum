@@ -8,9 +8,17 @@
     width: 400px;
   }
 
+  &:has(input:focus-visible) {
+    border-radius: var(--mantine-radius-default);
+    outline: 2px solid var(--mantine-primary-color-filled);
+    outline-offset: calc(0.125rem * var(--mantine-scale));
+  }
+
   @media (max-width: 800px) {
     input {
       width: 150px;
+      max-width: 100%;
+      min-width: 0;
     }
     input:focus {
       width: 150px;

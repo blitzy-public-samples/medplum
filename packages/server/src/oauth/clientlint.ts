@@ -132,6 +132,15 @@ function parseRedirectUri(uri: string): URL | undefined {
 }
 
 /**
+ * Reduces a registered redirect URI list to the values the URI-scoped rules are evaluated against.
+ * @param redirectUris - The registered redirect URIs, in registration order.
+ * @returns The distinct redirect URIs, each in the position of its first occurrence.
+ */
+function distinctRedirectUris(redirectUris: string[]): string[] {
+  return Array.from(new Set(redirectUris));
+}
+
+/**
  * Determines whether a parsed redirect URI is an origin with no callback path on a non-loopback host.
  * @param url - The parsed redirect URI.
  * @returns True when the URI carries no path beyond the root on a non-loopback host.
@@ -169,7 +178,7 @@ function createFinding(
  * Entries are resolved in registration order, and a redirect URI match takes precedence over an id match within the
  * same entry.
  * @param clientId - The id of the client application.
- * @param redirectUris - The registered redirect URIs of the client application.
+ * @param redirectUris - The distinct registered redirect URIs of the client application, in first occurrence order.
  * @param entries - Standard OAuth clients in the order registration resolves them.
  * @returns A single finding for the first matching entry, or undefined when no entry matches.
  */
@@ -216,19 +225,21 @@ function aggregateStatus(findings: readonly OAuthClientLintFinding[]): OAuthClie
  * @param client - The client application to evaluate, including the deprecated singular `redirectUri` field.
  * @param options - Evaluation inputs supplied by the caller. Both members are optional; an absent member disables the
  * rules that depend on it.
- * @returns The client identity fields, every registered redirect URI in registration order, every finding in
- * deterministic emission order — one per matching rule and redirect URI pair for the URI-scoped rules, in URI order,
- * followed by the at most two client-level findings — and the aggregate status.
+ * @returns The client identity fields, every registered redirect URI in registration order including any repeated
+ * entry, every finding in deterministic emission order — exactly one per matching rule and distinct redirect URI pair
+ * for the URI-scoped rules, in first occurrence order of the URI, followed by the at most two client-level findings —
+ * and the aggregate status.
  */
 export function lintOAuthClient(
   client: WithId<ClientApplication>,
   options?: OAuthClientLintOptions
 ): OAuthClientLintResult {
   const redirectUris = getClientRedirectUris(client);
+  const evaluatedRedirectUris = distinctRedirectUris(redirectUris);
   const partialRedirectMatchEnabled = options?.partialRedirectMatchEnabled === true;
   const findings: OAuthClientLintFinding[] = [];
 
-  for (const redirectUri of redirectUris) {
+  for (const redirectUri of evaluatedRedirectUris) {
     const url = parseRedirectUri(redirectUri);
     if (url !== undefined && isBareOrigin(url)) {
       findings.push(
@@ -259,7 +270,7 @@ export function lintOAuthClient(
 
   const registrationDiscoverableClients = options?.registrationDiscoverableClients;
   if (registrationDiscoverableClients !== undefined) {
-    const finding = lintRegistrationDiscoverable(client.id, redirectUris, registrationDiscoverableClients);
+    const finding = lintRegistrationDiscoverable(client.id, evaluatedRedirectUris, registrationDiscoverableClients);
     if (finding !== undefined) {
       findings.push(finding);
     }
