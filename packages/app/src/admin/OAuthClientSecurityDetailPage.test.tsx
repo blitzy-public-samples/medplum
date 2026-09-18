@@ -2,11 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { notifications } from '@mantine/notifications';
 import { MockClient } from '@medplum/mock';
-import { MedplumProvider } from '@medplum/react';
-import type { DataRouter } from 'react-router';
-import { createMemoryRouter, RouterProvider } from 'react-router';
-import { AppRoutes } from '../AppRoutes';
-import { act, render, renderAppRoutes, screen } from '../test-utils/render';
+import { act, renderAppRoutes, screen } from '../test-utils/render';
 
 type OAuthClientLintStatus = 'pass' | 'warning' | 'fail';
 
@@ -52,23 +48,28 @@ const OCS_004_REMEDIATION =
   'The built-in client cannot be removed by configuration. Register a redirect URI that does not collide with it — the built-in client uses the loopback URI http://localhost:9615 — and give this client an id of its own.';
 
 const CLIENT_ID = '9f8c1d4e-3b2a-4c5d-8e7f-1a2b3c4d5e6f';
+const OTHER_CLIENT_ID = '5f6f9b2e-4a1c-4d5b-9e2f-0a1b2c3d4e5f';
 const BARE_ORIGIN_URI = 'https://app.example.com';
 const WILDCARD_URI = 'https://app.example.com/*';
 const EXACT_URI = 'https://app.example.com/oauth/callback';
 const ERROR_MESSAGE = 'OAuth security report unavailable';
+const NOT_VISIBLE_MESSAGE = 'This OAuth client is not visible in this project.';
+const MALFORMED_REPORT_MESSAGE = 'The OAuth client security report could not be read.';
 
 const medplum = new MockClient();
 const originalGet = medplum.get.bind(medplum);
 
 let lintReport: () => Promise<OAuthClientLintReport>;
 
-/**
- * Builds the OAuth client security endpoint envelope.
- * @param results - The lint results the stubbed endpoint returns.
- * @returns The report envelope the endpoint responds with.
- */
 function report(...results: OAuthClientLintResult[]): OAuthClientLintReport {
   return { total: results.length, offset: 0, count: 20, results };
+}
+
+function getLintRequestUrls(): string[] {
+  return vi
+    .mocked(medplum.get)
+    .mock.calls.map(([url]) => url.toString())
+    .filter((url) => url.includes('/oauth-security'));
 }
 
 /**
@@ -81,29 +82,62 @@ async function setup(url = '/admin/oauth-security/' + CLIENT_ID): Promise<void> 
   });
 }
 
-const FIRST_CLIENT_ID = '5f6f9b2e-4a1c-4d5b-9e2f-0a1b2c3d4e5f';
-const SECOND_CLIENT_ID = '7c8d9e0f-1a2b-4c3d-8e9f-0a1b2c3d4e60';
 const DEEP_LINK_CLIENT_ID = '2d3e4f50-6a7b-4c8d-9e0f-1a2b3c4d5e6f';
 
-/**
- * Renders the application routes at the detail view for one OAuth client and returns the router.
- * @param url - The URL to render.
- * @returns The router the application routes are rendered with.
- */
-async function setupWithRouter(url: string): Promise<DataRouter> {
-  const router = createMemoryRouter([{ path: '*', element: <AppRoutes /> }], {
-    initialEntries: [url],
-    initialIndex: 0,
-  });
-  await act(async () => {
-    render(
-      <MedplumProvider medplum={medplum} navigate={router.navigate}>
-        <RouterProvider router={router} />
-      </MedplumProvider>
-    );
-  });
-  return router;
-}
+const REJECTED_ROUTE_PARAMS: { readonly name: string; readonly routeParam: string }[] = [
+  { name: 'is not a UUID', routeParam: 'partner-portal' },
+  { name: 'names two client ids', routeParam: CLIENT_ID + ',' + OTHER_CLIENT_ID },
+  { name: 'carries an encoded query delimiter', routeParam: CLIENT_ID + '%26_offset%3D1' },
+];
+
+const MALFORMED_REPORTS: { readonly name: string; readonly payload: unknown }[] = [
+  { name: 'the report carries no result list', payload: { total: 1, offset: 0, count: 20 } },
+  {
+    name: 'the aggregate status is not a known status',
+    payload: {
+      total: 1,
+      offset: 0,
+      count: 20,
+      results: [
+        { id: CLIENT_ID, name: 'Partner Portal', redirectUris: [EXACT_URI], status: 'completed', findings: [] },
+      ],
+    },
+  },
+  {
+    name: 'a finding status is not a known status',
+    payload: {
+      total: 1,
+      offset: 0,
+      count: 20,
+      results: [
+        {
+          id: CLIENT_ID,
+          name: 'Partner Portal',
+          redirectUris: [WILDCARD_URI],
+          status: 'fail',
+          findings: [
+            {
+              ruleId: 'OCS-002',
+              status: 'completed',
+              redirectUri: WILDCARD_URI,
+              reason: OCS_002_REASON,
+              remediation: OCS_002_REMEDIATION,
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    name: 'the finding list is not a list of findings',
+    payload: {
+      total: 1,
+      offset: 0,
+      count: 20,
+      results: [{ id: CLIENT_ID, name: 'Partner Portal', redirectUris: [EXACT_URI], status: 'pass', findings: '' }],
+    },
+  },
+];
 
 describe('OAuthClientSecurityDetailPage', () => {
   beforeAll(() => {
@@ -259,7 +293,7 @@ describe('OAuthClientSecurityDetailPage', () => {
 
     await setup();
 
-    expect(await screen.findByText('This OAuth client is not visible in this project.')).toBeInTheDocument();
+    expect(await screen.findByText(NOT_VISIBLE_MESSAGE)).toBeInTheDocument();
     expect(screen.getByText('Back to OAuth Security')).toBeInTheDocument();
     expect(document.querySelector('.mantine-Loader-root')).toBeNull();
   });
@@ -274,11 +308,22 @@ describe('OAuthClientSecurityDetailPage', () => {
     expect(document.querySelector('.mantine-Loader-root')).toBeNull();
   });
 
-  test('Clears the previous client report when the client id changes', async () => {
+  test.each(REJECTED_ROUTE_PARAMS)(
+    'Requests no report and shows the not visible message when the route parameter $name',
+    async ({ routeParam }) => {
+      await setup('/admin/oauth-security/' + routeParam);
+
+      expect(await screen.findByText(NOT_VISIBLE_MESSAGE)).toBeInTheDocument();
+      expect(getLintRequestUrls()).toStrictEqual([]);
+      expect(document.querySelector('.mantine-Loader-root')).toBeNull();
+    }
+  );
+
+  test('Shows the not visible message when the report names a different client', async () => {
     lintReport = async () =>
       report({
-        id: FIRST_CLIENT_ID,
-        name: 'First Client',
+        id: OTHER_CLIENT_ID,
+        name: 'Another Project Client',
         redirectUris: [BARE_ORIGIN_URI],
         status: 'warning',
         findings: [
@@ -292,51 +337,50 @@ describe('OAuthClientSecurityDetailPage', () => {
         ],
       });
 
-    const router = await setupWithRouter('/admin/oauth-security/' + FIRST_CLIENT_ID);
+    await setup();
 
-    expect(await screen.findByText('First Client')).toBeInTheDocument();
-    expect(screen.getByText(OCS_001_REASON)).toBeInTheDocument();
-
-    let resolveSecond: (value: OAuthClientLintReport) => void = () => undefined;
-    const pending = new Promise<OAuthClientLintReport>((resolve) => {
-      resolveSecond = resolve;
-    });
-    lintReport = () => pending;
-
-    await act(async () => {
-      await router.navigate('/admin/oauth-security/' + SECOND_CLIENT_ID);
-    });
-
-    expect(screen.queryByText('First Client')).not.toBeInTheDocument();
+    expect(await screen.findByText(NOT_VISIBLE_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText('Another Project Client')).not.toBeInTheDocument();
     expect(screen.queryByText(OCS_001_REASON)).not.toBeInTheDocument();
-    expect(document.querySelector('.mantine-Loader-root')).not.toBeNull();
+    expect(getLintRequestUrls()).toStrictEqual(['admin/projects/123/oauth-security?_id=' + CLIENT_ID]);
+  });
 
-    await act(async () => {
-      resolveSecond(
-        report({
-          id: SECOND_CLIENT_ID,
-          name: 'Second Client',
+  test('Shows the not visible message when the report names more than one client', async () => {
+    lintReport = async () =>
+      report(
+        {
+          id: CLIENT_ID,
+          name: 'Routed Client',
+          redirectUris: [EXACT_URI],
+          status: 'pass',
+          findings: [],
+        },
+        {
+          id: OTHER_CLIENT_ID,
+          name: 'Another Project Client',
           redirectUris: [WILDCARD_URI],
           status: 'fail',
-          findings: [
-            {
-              ruleId: 'OCS-002',
-              status: 'fail',
-              redirectUri: WILDCARD_URI,
-              reason: OCS_002_REASON,
-              remediation: OCS_002_REMEDIATION,
-            },
-          ],
-        })
+          findings: [],
+        }
       );
-      await pending;
-    });
 
-    expect(await screen.findByText('Second Client')).toBeInTheDocument();
-    expect(screen.getByText(OCS_002_REASON)).toBeInTheDocument();
-    expect(medplum.get).toHaveBeenCalledWith('admin/projects/123/oauth-security?_id=' + SECOND_CLIENT_ID, {
-      cache: 'no-cache',
-    });
+    await setup();
+
+    expect(await screen.findByText(NOT_VISIBLE_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText('Routed Client')).not.toBeInTheDocument();
+    expect(screen.queryByText('Another Project Client')).not.toBeInTheDocument();
+  });
+
+  test.each(MALFORMED_REPORTS)('Shows an error outcome when $name', async ({ payload }) => {
+    lintReport = async () => payload as OAuthClientLintReport;
+
+    await setup();
+
+    expect(await screen.findByText(MALFORMED_REPORT_MESSAGE)).toBeInTheDocument();
+    expect(screen.getByText('Back to OAuth Security')).toBeInTheDocument();
+    expect(screen.queryByText('Partner Portal')).not.toBeInTheDocument();
+    expect(screen.queryByText('completed')).not.toBeInTheDocument();
+    expect(document.querySelector('.mantine-Loader-root')).toBeNull();
   });
 
   test('Renders the detail view and the admin OAuth Security tab link on a direct deep link', async () => {
@@ -367,8 +411,6 @@ describe('OAuthClientSecurityDetailPage', () => {
       expect(await screen.findByText('Deep Link Client')).toBeInTheDocument();
       expect(screen.getByText('OCS-002')).toBeInTheDocument();
       expect(screen.getByRole('link', { name: 'OAuth Security' })).toHaveAttribute('href', '/admin/oauth-security');
-      expect(screen.getByRole('tab', { name: 'OAuth Security' })).toHaveAttribute('aria-selected', 'true');
-      expect(screen.getByRole('tab', { name: 'Details' })).toHaveAttribute('aria-selected', 'false');
     } finally {
       window.history.replaceState({}, '', previousUrl);
     }

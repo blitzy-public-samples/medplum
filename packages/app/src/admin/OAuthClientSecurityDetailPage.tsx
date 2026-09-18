@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { Alert, Group, Stack, Text, Title } from '@mantine/core';
-import { normalizeOperationOutcome } from '@medplum/core';
+import { isObject, isString, isUUID, normalizeOperationOutcome } from '@medplum/core';
 import type { OperationOutcome } from '@medplum/fhirtypes';
 import { Loading, MedplumLink, OperationOutcomeAlert, StatusBadge, useMedplum } from '@medplum/react';
 import type { JSX } from 'react';
@@ -34,14 +34,21 @@ interface OAuthClientLintReport {
   readonly results: OAuthClientLintResult[];
 }
 
-interface OAuthClientLintRequestState {
-  readonly key: string;
-  readonly loading: boolean;
-  readonly result?: OAuthClientLintResult;
-  readonly outcome?: OperationOutcome;
-}
+type OAuthClientLintDetailState =
+  | { readonly kind: 'loading' }
+  | { readonly kind: 'loaded'; readonly result: OAuthClientLintResult }
+  | { readonly kind: 'not-visible' }
+  | { readonly kind: 'error'; readonly outcome: OperationOutcome };
 
 const LIST_PATH = '/admin/oauth-security';
+
+const LOADING_STATE: OAuthClientLintDetailState = { kind: 'loading' };
+
+const NOT_VISIBLE_STATE: OAuthClientLintDetailState = { kind: 'not-visible' };
+
+const MALFORMED_REPORT_MESSAGE = 'The OAuth client security report could not be read.';
+
+const FAIL_CLOSED_COLOR = 'red';
 
 const BADGE_COLORS = {
   pass: 'green',
@@ -55,23 +62,85 @@ const ALERT_COLORS = {
   fail: 'red',
 } as const;
 
+function isLintStatus(value: unknown): value is OAuthClientLintStatus {
+  return value === 'pass' || value === 'warning' || value === 'fail';
+}
+
+function isLintFinding(value: unknown): value is OAuthClientLintFinding {
+  return (
+    isObject(value) &&
+    isString(value.ruleId) &&
+    isLintStatus(value.status) &&
+    (value.redirectUri === undefined || isString(value.redirectUri)) &&
+    isString(value.reason) &&
+    isString(value.remediation)
+  );
+}
+
+function isLintResult(value: unknown): value is OAuthClientLintResult {
+  return (
+    isObject(value) &&
+    isString(value.id) &&
+    (value.name === undefined || isString(value.name)) &&
+    Array.isArray(value.redirectUris) &&
+    value.redirectUris.every(isString) &&
+    isLintStatus(value.status) &&
+    Array.isArray(value.findings) &&
+    value.findings.every(isLintFinding)
+  );
+}
+
+function getStatusColor(colors: Record<OAuthClientLintStatus, string>, status: string): string {
+  return isLintStatus(status) ? colors[status] : FAIL_CLOSED_COLOR;
+}
+
+function getMalformedReportState(): OAuthClientLintDetailState {
+  return { kind: 'error', outcome: normalizeOperationOutcome(new Error(MALFORMED_REPORT_MESSAGE)) };
+}
+
 /**
- * Builds the identity of one report request from both of its inputs.
- * @param projectId - The project the report is requested for.
- * @param clientId - The OAuth client the report is requested for.
- * @returns The request key.
+ * Maps one OAuth client security report to the state the detail view renders.
+ * @param payload - The report the endpoint returned.
+ * @param clientId - The client application id the report was requested for.
+ * @returns The loaded state when the report holds exactly one result naming that client, the not visible
+ * state for any other result set, and the error state for a report that does not match the endpoint contract.
  */
-function getRequestKey(projectId: string, clientId: string): string {
-  return projectId + '/' + clientId;
+function toDetailState(payload: unknown, clientId: string): OAuthClientLintDetailState {
+  if (!isObject(payload) || !Array.isArray(payload.results)) {
+    return getMalformedReportState();
+  }
+  const results: unknown[] = payload.results;
+  if (results.length !== 1) {
+    return NOT_VISIBLE_STATE;
+  }
+  const result = results[0];
+  if (!isLintResult(result)) {
+    return getMalformedReportState();
+  }
+  if (result.id !== clientId) {
+    return NOT_VISIBLE_STATE;
+  }
+  return { kind: 'loaded', result };
 }
 
 function BackLink(): JSX.Element {
   return <MedplumLink to={LIST_PATH}>Back to OAuth Security</MedplumLink>;
 }
 
+function NotVisibleMessage(): JSX.Element {
+  return (
+    <>
+      <BackLink />
+      <Text c="dimmed" mt="md">
+        This OAuth client is not visible in this project.
+      </Text>
+    </>
+  );
+}
+
 function FindingAlert({ finding }: { readonly finding: OAuthClientLintFinding }): JSX.Element {
   return (
-    <Alert color={ALERT_COLORS[finding.status]} title={finding.ruleId}>
+    <Alert color={getStatusColor(ALERT_COLORS, finding.status)} title={finding.ruleId}>
       {finding.redirectUri && (
         <Text size="sm" fw={500}>
           {finding.redirectUri}
@@ -85,32 +154,24 @@ function FindingAlert({ finding }: { readonly finding: OAuthClientLintFinding })
   );
 }
 
-/**
- * Read-only detail view for one OAuth client application in the current project. Lists every
- * finding the project admin OAuth security report returned for the client, naming the redirect
- * URI that triggered it, the reason and the suggested fix.
- * @returns The rendered element.
- */
-export function OAuthClientSecurityDetailPage(): JSX.Element {
+function OAuthClientSecurityDetail({ clientId }: { readonly clientId: string }): JSX.Element {
   const medplum = useMedplum();
-  const { clientId } = useParams() as { clientId: string };
   const projectId = getProjectId(medplum);
-  const requestKey = getRequestKey(projectId, clientId);
-  const [state, setState] = useState<OAuthClientLintRequestState>({ key: requestKey, loading: true });
+  const [state, setState] = useState<OAuthClientLintDetailState>(LOADING_STATE);
 
   useEffect(() => {
     let active = true;
-    const key = getRequestKey(projectId, clientId);
+    const query = new URLSearchParams({ _id: clientId });
     medplum
-      .get('admin/projects/' + projectId + '/oauth-security?_id=' + clientId, { cache: 'no-cache' })
+      .get('admin/projects/' + projectId + '/oauth-security?' + query.toString(), { cache: 'no-cache' })
       .then((report: OAuthClientLintReport) => {
         if (active) {
-          setState({ key, loading: false, result: report?.results?.[0] });
+          setState(toDetailState(report, clientId));
         }
       })
       .catch((err: unknown) => {
         if (active) {
-          setState({ key, loading: false, outcome: normalizeOperationOutcome(err) });
+          setState({ kind: 'error', outcome: normalizeOperationOutcome(err) });
         }
       });
     return () => {
@@ -118,11 +179,11 @@ export function OAuthClientSecurityDetailPage(): JSX.Element {
     };
   }, [medplum, projectId, clientId]);
 
-  if (state.loading || state.key !== requestKey) {
+  if (state.kind === 'loading') {
     return <Loading />;
   }
 
-  if (state.outcome) {
+  if (state.kind === 'error') {
     return (
       <>
         <BackLink />
@@ -131,25 +192,18 @@ export function OAuthClientSecurityDetailPage(): JSX.Element {
     );
   }
 
-  const result = state.result;
-  if (!result) {
-    return (
-      <>
-        <BackLink />
-        <Text c="dimmed" mt="md">
-          This OAuth client is not visible in this project.
-        </Text>
-      </>
-    );
+  if (state.kind === 'not-visible') {
+    return <NotVisibleMessage />;
   }
 
+  const result = state.result;
   const findings = [...result.findings].sort((a, b) => a.ruleId.localeCompare(b.ruleId));
 
   return (
     <>
       <Group justify="space-between" mb="md">
         <Title order={4}>{result.name || result.id}</Title>
-        <StatusBadge status={result.status} color={BADGE_COLORS[result.status]} variant="light" />
+        <StatusBadge status={result.status} color={getStatusColor(BADGE_COLORS, result.status)} variant="light" />
       </Group>
       <BackLink />
       {findings.length === 0 ? (
@@ -165,4 +219,19 @@ export function OAuthClientSecurityDetailPage(): JSX.Element {
       )}
     </>
   );
+}
+
+/**
+ * Read-only detail view for one OAuth client application of the current project.
+ * @returns Each finding the client security report returned, with its reason, its suggested fix and the
+ * redirect URI that triggered it when the finding names one.
+ */
+export function OAuthClientSecurityDetailPage(): JSX.Element {
+  const { clientId } = useParams() as { clientId: string };
+
+  if (!isUUID(clientId)) {
+    return <NotVisibleMessage />;
+  }
+
+  return <OAuthClientSecurityDetail key={clientId} clientId={clientId} />;
 }

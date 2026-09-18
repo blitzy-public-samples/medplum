@@ -18,6 +18,7 @@ export const OAuthClientLintRule = {
   PrefixMatchingEnabled: 'OCS-003',
   RegistrationDiscoverable: 'OCS-004',
   NoRedirectUri: 'OCS-005',
+  EvaluationTruncated: 'OCS-006',
 } as const;
 
 /**
@@ -38,12 +39,20 @@ export interface OAuthClientLintFinding {
 }
 
 /**
- * The complete evaluation of one client application.
+ * The evaluation of one client application.
  */
 export interface OAuthClientLintResult {
   readonly id: string;
   readonly name?: string;
+  /** The registered redirect URIs the evaluation read: a leading run of the full list, in registration order. */
   readonly redirectUris: string[];
+  /**
+   * True when a ceiling in {@link OAUTH_CLIENT_LINT_BUDGET} stopped the evaluation, in which case `findings` also
+   * carries an `OCS-006` finding. Absent when every registered redirect URI was read.
+   */
+  readonly truncated?: boolean;
+  /** The number of redirect URIs the client registers. Present only alongside `truncated`. */
+  readonly redirectUriCount?: number;
   /** The highest severity among `findings`, or `pass` when there are none. */
   readonly status: OAuthClientLintStatus;
   readonly findings: OAuthClientLintFinding[];
@@ -59,14 +68,44 @@ export interface RegistrationDiscoverableClient {
 }
 
 /**
+ * The registration-discoverable clients of one server, prepared for repeated evaluation by
+ * {@link indexRegistrationDiscoverableClients}.
+ */
+export interface RegistrationDiscoverableClientIndex {
+  /** The entries the index was built from, in the order registration resolves them. */
+  readonly entries: readonly RegistrationDiscoverableClient[];
+  /** The position in `entries` of the first entry that registers each redirect URI. */
+  readonly uriPositions: ReadonlyMap<string, number>;
+  /** The position in `entries` of the first entry that declares each client id. */
+  readonly idPositions: ReadonlyMap<string, number>;
+}
+
+/**
  * Evaluation inputs for {@link lintOAuthClient} that the client application resource does not carry.
  */
 export interface OAuthClientLintOptions {
   /** True when the project enables the `allow-dangerous-redirect` setting. */
   readonly partialRedirectMatchEnabled?: boolean;
-  /** Standard OAuth clients in the order registration resolves them. */
-  readonly registrationDiscoverableClients?: readonly RegistrationDiscoverableClient[];
+  /**
+   * Standard OAuth clients in the order registration resolves them, either as a list or as the index
+   * {@link indexRegistrationDiscoverableClients} builds from one. A caller evaluating several client applications
+   * against the same list passes the index, which is built once and read by every evaluation.
+   */
+  readonly registrationDiscoverableClients?:
+    readonly RegistrationDiscoverableClient[] | RegistrationDiscoverableClientIndex;
 }
+
+/**
+ * The ceilings one {@link lintOAuthClient} call applies to a single client application: the registered redirect URIs
+ * it reads, the UTF-8 bytes those URIs may span, and the findings it emits. Each ceiling is tested before a URI is
+ * read, so `findings` never exceeds `maxFindings` and `redirectUris` never spans more than `maxRedirectUriBytes`
+ * bytes. A result that stopped at a ceiling carries `truncated`, `redirectUriCount` and an `OCS-006` finding.
+ */
+export const OAUTH_CLIENT_LINT_BUDGET = {
+  maxRedirectUris: 20,
+  maxRedirectUriBytes: 4096,
+  maxFindings: 40,
+} as const;
 
 interface OAuthClientLintCopy {
   readonly reason: string;
@@ -97,6 +136,12 @@ const LINT_COPY: Record<Exclude<OAuthClientLintRuleId, 'OCS-004'>, OAuthClientLi
       'No redirect URI is configured, so this client cannot take part in a redirect-based authorization flow and no redirect risk applies.',
     remediation: 'None required.',
   },
+  'OCS-006': {
+    reason:
+      'This review did not read every redirect URI registered for this client, so the result is incomplete: the redirect URIs it did not read were not evaluated, and any risk they carry is not reported here. The redirect URIs listed for this client are the ones that were read.',
+    remediation:
+      'Remove the redirect URIs this client no longer uses, and shorten any unusually long entry, so that the whole list can be reviewed — then open this report again.',
+  },
 };
 
 const REGISTRATION_DISCOVERABLE_COPY: Record<RegistrationDiscoverableClient['source'], OAuthClientLintCopy> = {
@@ -122,11 +167,12 @@ const STATUS_RANK: Record<OAuthClientLintStatus, number> = {
 
 const LOOPBACK_HOSTNAMES: string[] = ['localhost', '127.0.0.1', '[::1]'];
 
-/**
- * Parses a registered redirect URI.
- * @param uri - The registered redirect URI.
- * @returns The parsed URL, or undefined when the value cannot be parsed.
- */
+/** The number of findings one registered redirect URI can produce: `OCS-001`, `OCS-002` and `OCS-003`. */
+const MAX_FINDINGS_PER_REDIRECT_URI = 3;
+
+/** The number of findings emitted after the redirect URIs: `OCS-004`, and one of `OCS-005` or `OCS-006`. */
+const MAX_CLIENT_LEVEL_FINDINGS = 2;
+
 function parseRedirectUri(uri: string): URL | undefined {
   try {
     return new URL(uri);
@@ -155,6 +201,42 @@ function isBareOrigin(url: URL): boolean {
  * @param redirectUri - The registered redirect URI that triggered the finding, when the finding is scoped to a URI.
  * @returns The finding, carrying a `redirectUri` key only when one was supplied.
  */
+/**
+ * Counts the redirect URIs a client application registers, without reading them.
+ * @param client - The client application.
+ * @returns The number of registered redirect URIs, including the deprecated singular field.
+ */
+function countRegisteredRedirectUris(client: ClientApplication): number {
+  return (client.redirectUri ? 1 : 0) + (client.redirectUris?.length ?? 0);
+}
+
+/**
+ * Reads the leading redirect URIs a client application registers, at most `maxRedirectUris` of them.
+ * @param client - The client application.
+ * @returns The registered redirect URIs, the deprecated singular field first, truncated to the count ceiling.
+ */
+function readRedirectUriPrefix(client: WithId<ClientApplication>): string[] {
+  const limit = OAUTH_CLIENT_LINT_BUDGET.maxRedirectUris;
+  if (countRegisteredRedirectUris(client) <= limit) {
+    return getClientRedirectUris(client);
+  }
+  return getClientRedirectUris({ ...client, redirectUris: client.redirectUris?.slice(0, limit) }).slice(0, limit);
+}
+
+/**
+ * Measures the UTF-8 size of a redirect URI against the bytes left in the byte ceiling.
+ * @param uri - The registered redirect URI.
+ * @param remainingBytes - The number of bytes left in the byte ceiling.
+ * @returns The UTF-8 size of the URI, or undefined when the URI does not fit the remaining bytes.
+ */
+function measureRedirectUriBytes(uri: string, remainingBytes: number): number | undefined {
+  if (uri.length > remainingBytes) {
+    return undefined;
+  }
+  const bytes = Buffer.byteLength(uri, 'utf8');
+  return bytes > remainingBytes ? undefined : bytes;
+}
+
 function createFinding(
   ruleId: OAuthClientLintRuleId,
   status: OAuthClientLintStatus,
@@ -168,36 +250,72 @@ function createFinding(
 }
 
 /**
- * Finds the first registration-discoverable client that shares a redirect URI or an id with the client application.
- * @param clientId - The id of the client application.
- * @param redirectUris - The registered redirect URIs of the client application.
+ * Indexes the registration-discoverable clients by redirect URI and by id, first entry wins. The index is
+ * independent of any client application, so one index serves every evaluation against the same entries.
  * @param entries - Standard OAuth clients in the order registration resolves them.
+ * @returns The entries and the position of the first entry carrying each redirect URI and each id.
+ */
+export function indexRegistrationDiscoverableClients(
+  entries: readonly RegistrationDiscoverableClient[]
+): RegistrationDiscoverableClientIndex {
+  const uriPositions = new Map<string, number>();
+  const idPositions = new Map<string, number>();
+  for (let position = 0; position < entries.length; position++) {
+    const entry = entries[position];
+    for (const uri of entry.redirectUris) {
+      if (!uriPositions.has(uri)) {
+        uriPositions.set(uri, position);
+      }
+    }
+    if (entry.id !== undefined && !idPositions.has(entry.id)) {
+      idPositions.set(entry.id, position);
+    }
+  }
+  return { entries, uriPositions, idPositions };
+}
+
+/**
+ * Finds the first registration-discoverable client that shares a redirect URI or an id with the client application.
+ *
+ * Entries are resolved in registration order, and a redirect URI match takes precedence over an id match within the
+ * same entry.
+ * @param clientId - The id of the client application.
+ * @param redirectUris - The registered redirect URIs of the client application that the evaluation read.
+ * @param index - The index of the standard OAuth clients registration resolves.
  * @returns A single finding for the first matching entry, or undefined when no entry matches.
  */
 function lintRegistrationDiscoverable(
   clientId: string,
   redirectUris: string[],
-  entries: readonly RegistrationDiscoverableClient[]
+  index: RegistrationDiscoverableClientIndex
 ): OAuthClientLintFinding | undefined {
-  for (const entry of entries) {
-    const matchedUri = redirectUris.find((uri) => entry.redirectUris.includes(uri));
-    if (matchedUri !== undefined) {
-      return createFinding(
-        OAuthClientLintRule.RegistrationDiscoverable,
-        'warning',
-        REGISTRATION_DISCOVERABLE_COPY[entry.source],
-        matchedUri
-      );
-    }
-    if (entry.id !== undefined && entry.id === clientId) {
-      return createFinding(
-        OAuthClientLintRule.RegistrationDiscoverable,
-        'warning',
-        REGISTRATION_DISCOVERABLE_COPY[entry.source]
-      );
+  const { entries, uriPositions, idPositions } = index;
+  let matchedPosition: number | undefined;
+  let matchedUri: string | undefined;
+
+  for (const uri of redirectUris) {
+    const position = uriPositions.get(uri);
+    if (position !== undefined && (matchedPosition === undefined || position < matchedPosition)) {
+      matchedPosition = position;
+      matchedUri = uri;
     }
   }
-  return undefined;
+
+  const idPosition = idPositions.get(clientId);
+  if (idPosition !== undefined && (matchedPosition === undefined || idPosition < matchedPosition)) {
+    matchedPosition = idPosition;
+    matchedUri = undefined;
+  }
+
+  if (matchedPosition === undefined) {
+    return undefined;
+  }
+  return createFinding(
+    OAuthClientLintRule.RegistrationDiscoverable,
+    'warning',
+    REGISTRATION_DISCOVERABLE_COPY[entries[matchedPosition].source],
+    matchedUri
+  );
 }
 
 /**
@@ -219,21 +337,45 @@ function aggregateStatus(findings: readonly OAuthClientLintFinding[]): OAuthClie
  * Evaluates the redirect URI configuration of one OAuth client application.
  *
  * The evaluation is deterministic and free of side effects: it reads only the client application and the options
- * passed to it, performs no I/O, and does not modify either argument.
+ * passed to it, performs no I/O, and does not modify either argument. It reads the registered redirect URIs in
+ * registration order and stops at the first one that a ceiling of {@link OAUTH_CLIENT_LINT_BUDGET} does not admit.
  * @param client - The client application to evaluate, including the deprecated singular `redirectUri` field.
  * @param options - Evaluation inputs supplied by the caller. Both members are optional; an absent member disables the
  * rules that depend on it.
- * @returns The client identity fields, one finding per matched rule in emission order, and the aggregate status.
+ * @returns The client identity fields, every finding in deterministic emission order — one per matching rule and
+ * redirect URI pair for the URI-scoped rules, in URI order, followed by the at most two client-level findings — the
+ * aggregate status, and, where a ceiling stopped the evaluation, `truncated` with the registered redirect URI count.
  */
 export function lintOAuthClient(
   client: WithId<ClientApplication>,
   options?: OAuthClientLintOptions
 ): OAuthClientLintResult {
-  const redirectUris = getClientRedirectUris(client);
+  const registeredRedirectUriCount = countRegisteredRedirectUris(client);
+  const readableRedirectUris = readRedirectUriPrefix(client);
   const partialRedirectMatchEnabled = options?.partialRedirectMatchEnabled === true;
+  const findingCeiling =
+    OAUTH_CLIENT_LINT_BUDGET.maxFindings - MAX_FINDINGS_PER_REDIRECT_URI - MAX_CLIENT_LEVEL_FINDINGS;
   const findings: OAuthClientLintFinding[] = [];
+  const redirectUris: string[] = [];
+  let redirectUriBytes = 0;
+  let truncated = readableRedirectUris.length < registeredRedirectUriCount;
 
-  for (const redirectUri of redirectUris) {
+  for (const redirectUri of readableRedirectUris) {
+    if (findings.length > findingCeiling) {
+      truncated = true;
+      break;
+    }
+    const uriBytes = measureRedirectUriBytes(
+      redirectUri,
+      OAUTH_CLIENT_LINT_BUDGET.maxRedirectUriBytes - redirectUriBytes
+    );
+    if (uriBytes === undefined) {
+      truncated = true;
+      break;
+    }
+    redirectUris.push(redirectUri);
+    redirectUriBytes += uriBytes;
+
     const url = parseRedirectUri(redirectUri);
     if (url !== undefined && isBareOrigin(url)) {
       findings.push(
@@ -264,15 +406,27 @@ export function lintOAuthClient(
 
   const registrationDiscoverableClients = options?.registrationDiscoverableClients;
   if (registrationDiscoverableClients !== undefined) {
-    const finding = lintRegistrationDiscoverable(client.id, redirectUris, registrationDiscoverableClients);
+    const index =
+      'uriPositions' in registrationDiscoverableClients
+        ? registrationDiscoverableClients
+        : indexRegistrationDiscoverableClients(registrationDiscoverableClients);
+    const finding = lintRegistrationDiscoverable(client.id, redirectUris, index);
     if (finding !== undefined) {
       findings.push(finding);
     }
   }
 
-  if (redirectUris.length === 0) {
+  if (registeredRedirectUriCount === 0) {
     findings.push(
       createFinding(OAuthClientLintRule.NoRedirectUri, 'pass', LINT_COPY[OAuthClientLintRule.NoRedirectUri])
+    );
+  } else if (truncated) {
+    findings.push(
+      createFinding(
+        OAuthClientLintRule.EvaluationTruncated,
+        'warning',
+        LINT_COPY[OAuthClientLintRule.EvaluationTruncated]
+      )
     );
   }
 
@@ -280,6 +434,7 @@ export function lintOAuthClient(
     id: client.id,
     ...(client.name === undefined ? {} : { name: client.name }),
     redirectUris,
+    ...(truncated ? { truncated: true, redirectUriCount: registeredRedirectUriCount } : {}),
     status: aggregateStatus(findings),
     findings,
   };

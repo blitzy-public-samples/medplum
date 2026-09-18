@@ -10,6 +10,7 @@ import { act, fireEvent, renderAppRoutes, screen, waitFor } from '../test-utils/
 const PROJECT_ID = '123';
 const EM_DASH = '—';
 const SKELETON_SELECTOR = '.mantine-Skeleton-root';
+const SKELETON_CELLS_PER_ROW = 2;
 const NAME_COLUMN_INDEX = 0;
 const REDIRECT_URI_COLUMN_INDEX = 1;
 const SECURITY_COLUMN_INDEX = 2;
@@ -18,8 +19,13 @@ const EXACT_CLIENT_NAME = 'Exact Callback Client';
 const WILDCARD_CLIENT_NAME = 'Wildcard Client';
 const LEGACY_CLIENT_NAME = 'Legacy Callback Client';
 const NO_URI_CLIENT_NAME = 'Unconfigured Client';
+const EXACT_REDIRECT_URI = 'https://app.example.com/oauth/callback';
+const WILDCARD_REDIRECT_URI = 'https://app.example.com/*';
 const LEGACY_REDIRECT_URI = 'https://legacy.example.com/oauth/callback';
+const REVIEWED_REDIRECT_URI = 'https://app.example.com/oauth/callback/reviewed';
 const LINT_ERROR_MESSAGE = 'Security review is unavailable';
+const MALFORMED_REPORT_MESSAGE = 'The OAuth client security review returned an unexpected response.';
+const UNRECOGNIZED_STATUS = 'completed';
 
 const DISPLAY_CLIENT_COUNT = 4;
 const SECOND_PAGE_CLIENT_COUNT = 2;
@@ -97,11 +103,6 @@ async function seedClient(name: string, status: LintStatus, config: Partial<Clie
   idByName.set(name, created.id);
 }
 
-/**
- * Returns the id of the seeded client with the given name.
- * @param name - The client name.
- * @returns The seeded client id.
- */
 function idFor(name: string): string {
   const id = idByName.get(name);
   if (!id) {
@@ -110,11 +111,6 @@ function idFor(name: string): string {
   return id;
 }
 
-/**
- * Reads the `_id` list from a security report request URL.
- * @param url - The request URL.
- * @returns The requested client ids in request order.
- */
 function getRequestedIds(url: string): string[] {
   const query = url.slice(url.indexOf('?') + 1);
   return new URLSearchParams(query).get('_id')?.split(',') ?? [];
@@ -131,12 +127,6 @@ function buildReport(ids: string[], status?: LintStatus): LintReport {
   return { total: results.length, offset: 0, count: DEFAULT_SEARCH_COUNT, results };
 }
 
-/**
- * Builds a single security report result.
- * @param id - The client id.
- * @param status - The aggregate security status.
- * @returns The result entry for one client.
- */
 function buildResult(id: string, status: LintStatus): LintResult {
   const client = clients.find((c) => c.id === id);
   const redirectUris = [...(client?.redirectUri ? [client.redirectUri] : []), ...(client?.redirectUris ?? [])];
@@ -144,10 +134,21 @@ function buildResult(id: string, status: LintStatus): LintResult {
 }
 
 /**
- * Returns the security report request URLs issued so far.
- * @param client - The client whose `get` calls are inspected.
- * @returns The request URLs, in call order.
+ * Replaces fields of the report results whose client id appears in the overrides.
+ * @param report - The report to rewrite.
+ * @param overrides - The replacement fields, keyed by client id. Override values may violate the endpoint contract.
+ * @returns The report carrying the replaced result fields.
  */
+function overrideResults(report: LintReport, overrides: Record<string, Record<string, unknown>>): LintReport {
+  return {
+    ...report,
+    results: report.results.map((result) => {
+      const override = overrides[result.id];
+      return override ? { ...result, ...override } : result;
+    }),
+  };
+}
+
 function lintCallUrls(client: MockClient = medplum): string[] {
   return vi
     .mocked(client.get)
@@ -155,11 +156,6 @@ function lintCallUrls(client: MockClient = medplum): string[] {
     .filter((url) => url.includes('/oauth-security'));
 }
 
-/**
- * Returns the table row holding the given client name.
- * @param name - The client name.
- * @returns The table row element.
- */
 function getRow(name: string): HTMLTableRowElement {
   const row = screen.getByText(name).closest('tr');
   if (!row) {
@@ -168,12 +164,6 @@ function getRow(name: string): HTMLTableRowElement {
   return row;
 }
 
-/**
- * Returns one cell of the table row holding the given client name.
- * @param name - The client name.
- * @param columnIndex - The zero-based column index.
- * @returns The cell element.
- */
 function getCell(name: string, columnIndex: number): HTMLTableCellElement {
   const cell = getRow(name).querySelectorAll('td')[columnIndex];
   if (!cell) {
@@ -200,28 +190,16 @@ function getRedirectUriCellText(name: string): string {
   return getCellText(name, REDIRECT_URI_COLUMN_INDEX);
 }
 
-/**
- * Returns the client names of the rows the table currently renders.
- * @returns The rendered client names, in row order.
- */
 function renderedClientNames(): string[] {
   return screen
     .getAllByTestId('search-control-row')
     .map((row) => row.querySelectorAll('td')[NAME_COLUMN_INDEX]?.textContent ?? '');
 }
 
-/**
- * Returns the client ids of the rows the table currently renders.
- * @returns The rendered client ids, in row order.
- */
 function renderedClientIds(): string[] {
   return renderedClientNames().map(idFor);
 }
 
-/**
- * Returns the number of skeleton placeholders currently rendered.
- * @returns The skeleton count.
- */
 function skeletonCount(): number {
   return document.querySelectorAll(SKELETON_SELECTOR).length;
 }
@@ -253,8 +231,8 @@ describe('OAuthClientSecurityPage', () => {
       },
     });
 
-    await seedClient(EXACT_CLIENT_NAME, 'pass', { redirectUris: ['https://app.example.com/oauth/callback'] });
-    await seedClient(WILDCARD_CLIENT_NAME, 'fail', { redirectUris: ['https://app.example.com/*'] });
+    await seedClient(EXACT_CLIENT_NAME, 'pass', { redirectUris: [EXACT_REDIRECT_URI] });
+    await seedClient(WILDCARD_CLIENT_NAME, 'fail', { redirectUris: [WILDCARD_REDIRECT_URI] });
     await seedClient(LEGACY_CLIENT_NAME, 'warning', { redirectUri: LEGACY_REDIRECT_URI });
     await seedClient(NO_URI_CLIENT_NAME, 'pass');
     for (let i = 0; i < FILLER_CLIENT_COUNT; i++) {
@@ -303,6 +281,42 @@ describe('OAuthClientSecurityPage', () => {
     expectSameIds(getRequestedIds(lintCallUrls()[0]), renderedClientIds());
     expect(medplum.get).toHaveBeenCalledWith(lintCallUrls()[0], { cache: 'no-cache' });
     expect(skeletonCount()).toBe(0);
+  });
+
+  test('Renders the redirect URIs of the resolved security evaluation rather than those of the search result', async () => {
+    const deferred = createDeferred<LintReport>();
+    lintResponder = () => deferred.promise;
+
+    await setup();
+
+    await waitFor(() => {
+      expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('');
+    });
+
+    expect(getRedirectUriCellText(EXACT_CLIENT_NAME)).toBe('');
+    expect(getCell(EXACT_CLIENT_NAME, REDIRECT_URI_COLUMN_INDEX).querySelector(SKELETON_SELECTOR)).not.toBeNull();
+    expect(screen.queryByText(EXACT_REDIRECT_URI)).not.toBeInTheDocument();
+    expect(screen.queryByText(WILDCARD_REDIRECT_URI)).not.toBeInTheDocument();
+
+    const requestedIds = getRequestedIds(lintCallUrls()[0]);
+    await act(async () => {
+      deferred.resolve(
+        overrideResults(buildReport(requestedIds), {
+          [idFor(EXACT_CLIENT_NAME)]: { redirectUris: [REVIEWED_REDIRECT_URI] },
+          [idFor(WILDCARD_CLIENT_NAME)]: { redirectUris: [] },
+        })
+      );
+    });
+
+    await waitFor(() => {
+      expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('pass');
+    });
+
+    expect(getRedirectUriCellText(EXACT_CLIENT_NAME)).toBe(REVIEWED_REDIRECT_URI);
+    expect(getSecurityCellText(WILDCARD_CLIENT_NAME)).toBe('fail');
+    expect(getRedirectUriCellText(WILDCARD_CLIENT_NAME)).toBe(EM_DASH);
+    expect(getRedirectUriCellText(LEGACY_CLIENT_NAME)).toBe(LEGACY_REDIRECT_URI);
+    expect(getRedirectUriCellText(NO_URI_CLIENT_NAME)).toBe(EM_DASH);
   });
 
   test('Shows the OAuth Security tab in the admin navigation', async () => {
@@ -459,6 +473,60 @@ describe('OAuthClientSecurityPage', () => {
       expect(skeletonCount()).toBe(0);
     });
 
+    test('A delayed response for a superseded request covering the same clients does not overwrite the current one', async () => {
+      const deferreds: Deferred<LintReport>[] = [];
+      lintResponder = () => {
+        const deferred = createDeferred<LintReport>();
+        deferreds.push(deferred);
+        return deferred.promise;
+      };
+
+      await setup();
+
+      await waitFor(() => {
+        expect(lintCallUrls()).toHaveLength(1);
+      });
+      const firstPageRequestIds = getRequestedIds(lintCallUrls()[0]);
+
+      expect(await screen.findByLabelText('Next page')).toBeInTheDocument();
+      await act(async () => {
+        fireEvent.click(screen.getByLabelText('Next page'));
+      });
+
+      await waitFor(() => {
+        expect(lintCallUrls()).toHaveLength(2);
+      });
+      const secondPageRequestIds = getRequestedIds(lintCallUrls()[1]);
+
+      expect(await screen.findByLabelText('Previous page')).toBeInTheDocument();
+      await act(async () => {
+        fireEvent.click(screen.getByLabelText('Previous page'));
+      });
+
+      await waitFor(() => {
+        expect(lintCallUrls()).toHaveLength(3);
+      });
+      expectSameIds(getRequestedIds(lintCallUrls()[2]), firstPageRequestIds);
+
+      await act(async () => {
+        deferreds[2].resolve(buildReport(firstPageRequestIds, 'fail'));
+      });
+
+      await waitFor(() => {
+        expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('fail');
+      });
+
+      await act(async () => {
+        deferreds[0].resolve(buildReport(firstPageRequestIds, 'pass'));
+        deferreds[1].resolve(buildReport(secondPageRequestIds, 'warning'));
+      });
+
+      for (const name of renderedClientNames()) {
+        expect(getSecurityCellText(name)).toBe('fail');
+      }
+      expect(skeletonCount()).toBe(0);
+    });
+
     test('A security response that omits a client settles that row to the empty placeholder', async () => {
       const omittedId = idFor(EXACT_CLIENT_NAME);
       const deferred = createDeferred<LintReport>();
@@ -481,6 +549,8 @@ describe('OAuthClientSecurityPage', () => {
 
       expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe(EM_DASH);
       expect(getCell(EXACT_CLIENT_NAME, SECURITY_COLUMN_INDEX).querySelector(SKELETON_SELECTOR)).toBeNull();
+      expect(getRedirectUriCellText(EXACT_CLIENT_NAME)).toBe(EM_DASH);
+      expect(getRedirectUriCellText(WILDCARD_CLIENT_NAME)).toBe(WILDCARD_REDIRECT_URI);
       expect(skeletonCount()).toBe(0);
     });
 
@@ -496,7 +566,7 @@ describe('OAuthClientSecurityPage', () => {
 
       const loadingNames = renderedClientNames();
       expect(loadingNames).toHaveLength(DEFAULT_SEARCH_COUNT);
-      expect(skeletonCount()).toBe(loadingNames.length);
+      expect(skeletonCount()).toBe(loadingNames.length * SKELETON_CELLS_PER_ROW);
 
       await act(async () => {
         deferred.reject(new Error(LINT_ERROR_MESSAGE));
@@ -510,10 +580,69 @@ describe('OAuthClientSecurityPage', () => {
 
       expect(renderedClientNames()).toStrictEqual(loadingNames);
       for (const name of loadingNames) {
-        const securityCell = getCell(name, SECURITY_COLUMN_INDEX);
-        expect(securityCell.textContent).toBe(EM_DASH);
-        expect(securityCell.querySelector(SKELETON_SELECTOR)).toBeNull();
+        for (const columnIndex of [REDIRECT_URI_COLUMN_INDEX, SECURITY_COLUMN_INDEX]) {
+          const cell = getCell(name, columnIndex);
+          expect(cell.textContent).toBe(EM_DASH);
+          expect(cell.querySelector(SKELETON_SELECTOR)).toBeNull();
+        }
       }
+      expect(skeletonCount()).toBe(0);
+    });
+  });
+
+  describe('Malformed security responses', () => {
+    const malformedResultCases: [string, Record<string, unknown>][] = [
+      ['an unrecognized aggregate status', { status: UNRECOGNIZED_STATUS }],
+      ['no aggregate status', { status: undefined }],
+      ['no client id', { id: undefined }],
+      ['no redirect URI list', { redirectUris: undefined }],
+      [
+        'a finding with an unrecognized status',
+        {
+          findings: [
+            { ruleId: 'OCS-001', status: UNRECOGNIZED_STATUS, reason: 'Registered as an origin', remediation: 'None' },
+          ],
+        },
+      ],
+    ];
+
+    test.each(malformedResultCases)(
+      'Settles a client whose security result carries %s and reports the response',
+      async (_description, override) => {
+        lintResponder = (url) =>
+          Promise.resolve(overrideResults(buildReport(getRequestedIds(url)), { [idFor(EXACT_CLIENT_NAME)]: override }));
+
+        await setup();
+
+        await waitFor(() => {
+          expect(getSecurityCellText(WILDCARD_CLIENT_NAME)).toBe('fail');
+        });
+
+        expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe(EM_DASH);
+        expect(getCell(EXACT_CLIENT_NAME, SECURITY_COLUMN_INDEX).querySelector(SKELETON_SELECTOR)).toBeNull();
+        expect(screen.queryByText(UNRECOGNIZED_STATUS)).not.toBeInTheDocument();
+        expect(getRedirectUriCellText(EXACT_CLIENT_NAME)).toBe(EM_DASH);
+        expect(screen.queryByText(EXACT_REDIRECT_URI)).not.toBeInTheDocument();
+        expect(await screen.findByText(MALFORMED_REPORT_MESSAGE)).toBeInTheDocument();
+        expect(skeletonCount()).toBe(0);
+      }
+    );
+
+    test('Settles every row when the security response is not a report envelope', async () => {
+      lintResponder = () => Promise.resolve({ ok: true } as unknown as LintReport);
+
+      await setup();
+
+      await waitFor(() => {
+        expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe(EM_DASH);
+      });
+
+      expect(await screen.findByText(MALFORMED_REPORT_MESSAGE)).toBeInTheDocument();
+      for (const name of renderedClientNames()) {
+        expect(getSecurityCellText(name)).toBe(EM_DASH);
+        expect(getRedirectUriCellText(name)).toBe(EM_DASH);
+      }
+      expect(screen.queryByText(LEGACY_REDIRECT_URI)).not.toBeInTheDocument();
       expect(skeletonCount()).toBe(0);
     });
   });

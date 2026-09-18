@@ -4,7 +4,7 @@ import { Skeleton, Stack, Text } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
 import type { SearchRequest } from '@medplum/core';
 import { DEFAULT_SEARCH_COUNT, normalizeErrorString, Operator } from '@medplum/core';
-import type { ClientApplication, Resource } from '@medplum/fhirtypes';
+import type { Resource } from '@medplum/fhirtypes';
 import type { SearchControlAdditionalColumn, SearchLoadEvent } from '@medplum/react';
 import { SearchControl, StatusBadge, useMedplum } from '@medplum/react';
 import type { JSX, ReactNode } from 'react';
@@ -45,21 +45,78 @@ type SecurityCellState =
 const LOADING_CELL: SecurityCellState = { kind: 'loading' };
 const UNAVAILABLE_CELL: SecurityCellState = { kind: 'unavailable' };
 
-const STATUS_COLORS = {
+const STATUS_COLORS: Record<OAuthClientLintStatus, string> = {
   pass: 'green',
   warning: 'orange',
   fail: 'red',
-} as const;
+};
 
-function getRedirectUris(client: ClientApplication): string[] {
-  const uris: string[] = [];
-  if (client.redirectUri) {
-    uris.push(client.redirectUri);
+const UNRECOGNIZED_STATUS_COLOR = 'red';
+
+const MALFORMED_REPORT_MESSAGE = 'The OAuth client security review returned an unexpected response.';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+}
+
+function isLintStatus(value: unknown): value is OAuthClientLintStatus {
+  return value === 'pass' || value === 'warning' || value === 'fail';
+}
+
+function isLintFinding(value: unknown): value is OAuthClientLintFinding {
+  return (
+    isRecord(value) &&
+    typeof value.ruleId === 'string' &&
+    isLintStatus(value.status) &&
+    (value.redirectUri === undefined || typeof value.redirectUri === 'string') &&
+    typeof value.reason === 'string' &&
+    typeof value.remediation === 'string'
+  );
+}
+
+function isLintResult(value: unknown): value is OAuthClientLintResult {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    value.id !== '' &&
+    (value.name === undefined || typeof value.name === 'string') &&
+    isStringArray(value.redirectUris) &&
+    isLintStatus(value.status) &&
+    Array.isArray(value.findings) &&
+    value.findings.every(isLintFinding)
+  );
+}
+
+/**
+ * Narrows an OAuth client security response to the results it carries that match the endpoint contract.
+ * @param response - The raw response body returned by the security review endpoint.
+ * @returns The validated report when the envelope is well formed, together with whether any part of the response
+ * failed validation and was discarded.
+ */
+function parseSecurityReport(response: unknown): { report?: OAuthClientLintReport; malformed: boolean } {
+  if (
+    !isRecord(response) ||
+    typeof response.total !== 'number' ||
+    typeof response.offset !== 'number' ||
+    typeof response.count !== 'number' ||
+    !Array.isArray(response.results)
+  ) {
+    return { malformed: true };
   }
-  if (client.redirectUris) {
-    uris.push(...client.redirectUris);
-  }
-  return uris;
+
+  const results = response.results.filter(isLintResult);
+  return {
+    report: { total: response.total, offset: response.offset, count: response.count, results },
+    malformed: results.length !== response.results.length,
+  };
+}
+
+function getStatusColor(status: string): string {
+  return isLintStatus(status) ? STATUS_COLORS[status] : UNRECOGNIZED_STATUS_COLOR;
 }
 
 function renderEmptyCell(): JSX.Element {
@@ -80,7 +137,7 @@ export function OAuthClientSecurityTable(): JSX.Element {
   const navigate = useNavigate();
 
   const [cellStates, setCellStates] = useState<Record<string, SecurityCellState>>({});
-  const requestKeyRef = useRef<string>('');
+  const requestGenerationRef = useRef<number>(0);
 
   const [search, setSearch] = useState<SearchRequest>({
     resourceType: 'ClientApplication',
@@ -96,8 +153,8 @@ export function OAuthClientSecurityTable(): JSX.Element {
       const ids = Array.from(
         new Set(entries.map((entry) => entry.resource?.id).filter((id): id is string => id !== undefined))
       );
-      const requestKey = ids.join(',');
-      requestKeyRef.current = requestKey;
+      const generation = requestGenerationRef.current + 1;
+      requestGenerationRef.current = generation;
 
       if (ids.length === 0) {
         setCellStates({});
@@ -111,11 +168,12 @@ export function OAuthClientSecurityTable(): JSX.Element {
       setCellStates(loadingStates);
 
       medplum
-        .get(`admin/projects/${projectId}/oauth-security?_id=${requestKey}`, { cache: 'no-cache' })
-        .then((report: OAuthClientLintReport) => {
-          if (requestKeyRef.current !== requestKey) {
+        .get<unknown>(`admin/projects/${projectId}/oauth-security?_id=${ids.join(',')}`, { cache: 'no-cache' })
+        .then((response: unknown) => {
+          if (requestGenerationRef.current !== generation) {
             return;
           }
+          const { report, malformed } = parseSecurityReport(response);
           const resultsById = new Map<string, OAuthClientLintResult>(
             (report?.results ?? []).map((result) => [result.id, result])
           );
@@ -125,9 +183,12 @@ export function OAuthClientSecurityTable(): JSX.Element {
             nextStates[id] = result ? { kind: 'resolved', result } : UNAVAILABLE_CELL;
           }
           setCellStates(nextStates);
+          if (malformed) {
+            showNotification({ color: 'red', message: MALFORMED_REPORT_MESSAGE, autoClose: false });
+          }
         })
         .catch((err: unknown) => {
-          if (requestKeyRef.current !== requestKey) {
+          if (requestGenerationRef.current !== generation) {
             return;
           }
           const nextStates: Record<string, SecurityCellState> = {};
@@ -146,7 +207,14 @@ export function OAuthClientSecurityTable(): JSX.Element {
       {
         name: 'Redirect URIs',
         renderCell: (resource: Resource): ReactNode => {
-          const uris = getRedirectUris(resource as ClientApplication);
+          const cellState = resource.id ? cellStates[resource.id] : undefined;
+          if (cellState?.kind === 'loading') {
+            return <Skeleton height="var(--mantine-font-size-sm)" radius="sm" />;
+          }
+          if (cellState?.kind !== 'resolved') {
+            return renderEmptyCell();
+          }
+          const uris = cellState.result.redirectUris;
           if (uris.length === 0) {
             return renderEmptyCell();
           }
@@ -167,7 +235,7 @@ export function OAuthClientSecurityTable(): JSX.Element {
           const cellState = resource.id ? cellStates[resource.id] : undefined;
           if (cellState?.kind === 'resolved') {
             const status = cellState.result.status;
-            return <StatusBadge status={status} color={STATUS_COLORS[status]} variant="light" />;
+            return <StatusBadge status={status} color={getStatusColor(status)} variant="light" />;
           }
           if (cellState?.kind === 'loading') {
             return <Skeleton height={22} width={70} radius="xl" />;

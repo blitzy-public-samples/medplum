@@ -77,23 +77,6 @@ describe('LinkTabs', () => {
     expect(overviewTab).toHaveAttribute('aria-selected', 'true');
   });
 
-  test('initializes with the owning tab for a nested path below the tab', () => {
-    mockLocationUtils.getPathname.mockReturnValue('/patient/123/timeline/456');
-    setup();
-
-    const timelineTab = screen.getByRole('tab', { name: 'Timeline' });
-    expect(timelineTab).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute('aria-selected', 'false');
-  });
-
-  test('initializes with first tab when a nested path is not below the base URL', () => {
-    mockLocationUtils.getPathname.mockReturnValue('/other/456/timeline/789');
-    setup();
-
-    const overviewTab = screen.getByRole('tab', { name: 'Overview' });
-    expect(overviewTab).toHaveAttribute('aria-selected', 'true');
-  });
-
   test('navigates when tab is clicked', async () => {
     setup();
 

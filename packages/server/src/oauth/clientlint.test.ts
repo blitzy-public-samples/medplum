@@ -10,7 +10,7 @@ import type {
   OAuthClientLintStatus,
   RegistrationDiscoverableClient,
 } from './clientlint';
-import { lintOAuthClient } from './clientlint';
+import { indexRegistrationDiscoverableClients, lintOAuthClient, OAUTH_CLIENT_LINT_BUDGET } from './clientlint';
 
 const TEST_CLIENT_ID = 'test-client';
 
@@ -37,6 +37,10 @@ const BUILT_IN_DISCOVERABLE_REMEDIATION =
 const NO_REDIRECT_URI_REASON =
   'No redirect URI is configured, so this client cannot take part in a redirect-based authorization flow and no redirect risk applies.';
 const NO_REDIRECT_URI_REMEDIATION = 'None required.';
+const EVALUATION_TRUNCATED_REASON =
+  'This review did not read every redirect URI registered for this client, so the result is incomplete: the redirect URIs it did not read were not evaluated, and any risk they carry is not reported here. The redirect URIs listed for this client are the ones that were read.';
+const EVALUATION_TRUNCATED_REMEDIATION =
+  'Remove the redirect URIs this client no longer uses, and shorten any unusually long entry, so that the whole list can be reviewed — then open this report again.';
 
 function client(props: Partial<ClientApplication> = {}): WithId<ClientApplication> {
   return { ...props, resourceType: 'ClientApplication', id: props.id ?? TEST_CLIENT_ID };
@@ -54,6 +58,17 @@ function onlyFindingForRule(result: OAuthClientLintResult, ruleId: OAuthClientLi
   const matches = findingsForRule(result, ruleId);
   expect(matches).toHaveLength(1);
   return matches[0];
+}
+
+function bareOriginUris(count: number): string[] {
+  return Array.from({ length: count }, (_, index) => 'https://app' + index + '.example.com');
+}
+
+function callbackUrisOfLength(count: number, length: number): string[] {
+  return Array.from({ length: count }, (_, index) => {
+    const prefix = 'https://app.example.com/cb/' + String(index).padStart(4, '0') + '/';
+    return prefix + 'a'.repeat(length - prefix.length);
+  });
 }
 
 const unparseableCases: {
@@ -115,6 +130,60 @@ const registrationCases: {
   },
 ];
 
+const registrationOrderCases: {
+  name: string;
+  clientId: string;
+  redirectUris: string[];
+  entries: RegistrationDiscoverableClient[];
+  expectedRedirectUri: string | undefined;
+  expectedReason: string;
+}[] = [
+  {
+    name: 'an id match in an earlier entry ahead of a redirect URI match in a later entry',
+    clientId: TEST_CLIENT_ID,
+    redirectUris: ['https://app.example.com/oauth/callback'],
+    entries: [
+      { id: TEST_CLIENT_ID, redirectUris: ['https://other.example.com/cb'], source: 'built-in' },
+      { id: 'later-entry', redirectUris: ['https://app.example.com/oauth/callback'], source: 'config' },
+    ],
+    expectedRedirectUri: undefined,
+    expectedReason: BUILT_IN_DISCOVERABLE_REASON,
+  },
+  {
+    name: 'a redirect URI match in an earlier entry ahead of an id match in a later entry',
+    clientId: TEST_CLIENT_ID,
+    redirectUris: ['https://app.example.com/oauth/callback'],
+    entries: [
+      { id: 'earlier-entry', redirectUris: ['https://app.example.com/oauth/callback'], source: 'config' },
+      { id: TEST_CLIENT_ID, redirectUris: [], source: 'built-in' },
+    ],
+    expectedRedirectUri: 'https://app.example.com/oauth/callback',
+    expectedReason: CONFIG_DISCOVERABLE_REASON,
+  },
+  {
+    name: 'the redirect URI match ahead of the id match within one entry',
+    clientId: TEST_CLIENT_ID,
+    redirectUris: ['https://app.example.com/oauth/callback'],
+    entries: [{ id: TEST_CLIENT_ID, redirectUris: ['https://app.example.com/oauth/callback'], source: 'config' }],
+    expectedRedirectUri: 'https://app.example.com/oauth/callback',
+    expectedReason: CONFIG_DISCOVERABLE_REASON,
+  },
+  {
+    name: 'the first registered redirect URI when one entry carries two of them',
+    clientId: TEST_CLIENT_ID,
+    redirectUris: ['https://first.example.com/cb', 'https://second.example.com/cb'],
+    entries: [
+      {
+        id: 'unrelated-entry',
+        redirectUris: ['https://second.example.com/cb', 'https://first.example.com/cb'],
+        source: 'config',
+      },
+    ],
+    expectedRedirectUri: 'https://first.example.com/cb',
+    expectedReason: CONFIG_DISCOVERABLE_REASON,
+  },
+];
+
 const copyCases: {
   name: string;
   ruleId: OAuthClientLintRuleId;
@@ -173,6 +242,13 @@ const copyCases: {
     subject: client(),
     expectedReason: NO_REDIRECT_URI_REASON,
     expectedRemediation: NO_REDIRECT_URI_REMEDIATION,
+  },
+  {
+    name: 'OCS-006',
+    ruleId: 'OCS-006',
+    subject: client({ redirectUris: bareOriginUris(OAUTH_CLIENT_LINT_BUDGET.maxRedirectUris + 1) }),
+    expectedReason: EVALUATION_TRUNCATED_REASON,
+    expectedRemediation: EVALUATION_TRUNCATED_REMEDIATION,
   },
 ];
 
@@ -400,6 +476,185 @@ describe('lintOAuthClient', () => {
 
     expect(finding.reason).toBe(testCase.expectedReason);
     expect(finding.remediation).toBe(testCase.expectedRemediation);
+  });
+
+  test.each(registrationOrderCases)('resolves $name', (testCase) => {
+    const result = lintOAuthClient(client({ id: testCase.clientId, redirectUris: testCase.redirectUris }), {
+      registrationDiscoverableClients: testCase.entries,
+    });
+
+    const finding = onlyFindingForRule(result, 'OCS-004');
+    expect(finding.status).toBe('warning');
+    expect(finding.redirectUri).toBe(testCase.expectedRedirectUri);
+    expect(finding.reason).toBe(testCase.expectedReason);
+    expect(result.status).toBe('warning');
+  });
+
+  test('omits the truncation fields when every registered redirect URI was read', () => {
+    const result = lintOAuthClient(
+      client({ redirectUris: ['https://app.example.com/oauth/callback', 'https://app.example.com'] })
+    );
+
+    expect(result.redirectUris).toHaveLength(2);
+    expect(result.truncated).toBeUndefined();
+    expect(result.redirectUriCount).toBeUndefined();
+    expect(Object.keys(result)).toStrictEqual(['id', 'redirectUris', 'status', 'findings']);
+  });
+
+  test('reads no more redirect URIs than the count ceiling allows and reports the evaluation as truncated', () => {
+    const registered = bareOriginUris(OAUTH_CLIENT_LINT_BUDGET.maxRedirectUris + 5);
+
+    const result = lintOAuthClient(client({ redirectUris: registered }));
+
+    expect(result.redirectUris).toStrictEqual(registered.slice(0, OAUTH_CLIENT_LINT_BUDGET.maxRedirectUris));
+    expect(result.truncated).toBe(true);
+    expect(result.redirectUriCount).toBe(registered.length);
+    expect(findingsForRule(result, 'OCS-001').map((finding) => finding.redirectUri)).toStrictEqual(result.redirectUris);
+    expect(ruleIds(result).at(-1)).toBe('OCS-006');
+    expect(result.findings).toHaveLength(OAUTH_CLIENT_LINT_BUDGET.maxRedirectUris + 1);
+    expect(result.status).toBe('warning');
+    expect(lintOAuthClient(client({ redirectUris: registered }))).toStrictEqual(result);
+  });
+
+  test('reads a redirect URI list of extreme cardinality without copying all of it', () => {
+    const registered = bareOriginUris(200_000);
+
+    const result = lintOAuthClient(client({ redirectUris: registered }));
+
+    expect(result.redirectUris).toStrictEqual(registered.slice(0, OAUTH_CLIENT_LINT_BUDGET.maxRedirectUris));
+    expect(result.truncated).toBe(true);
+    expect(result.redirectUriCount).toBe(registered.length);
+    expect(result.findings).toHaveLength(OAUTH_CLIENT_LINT_BUDGET.maxRedirectUris + 1);
+    expect(onlyFindingForRule(result, 'OCS-006').status).toBe('warning');
+    expect(result.status).toBe('warning');
+  });
+
+  test('reads no more redirect URI bytes than the byte ceiling allows', () => {
+    const uriLength = 512;
+    const expectedRead = Math.floor(OAUTH_CLIENT_LINT_BUDGET.maxRedirectUriBytes / uriLength);
+    const registered = callbackUrisOfLength(expectedRead + 3, uriLength);
+
+    const result = lintOAuthClient(client({ redirectUris: registered }));
+
+    expect(result.redirectUris).toStrictEqual(registered.slice(0, expectedRead));
+    expect(Buffer.byteLength(result.redirectUris.join(''), 'utf8')).toBeLessThanOrEqual(
+      OAUTH_CLIENT_LINT_BUDGET.maxRedirectUriBytes
+    );
+    expect(result.truncated).toBe(true);
+    expect(result.redirectUriCount).toBe(registered.length);
+    expect(ruleIds(result)).toStrictEqual(['OCS-006']);
+    expect(result.status).toBe('warning');
+  });
+
+  test('counts redirect URI bytes rather than UTF-16 code units', () => {
+    const multiByteUri = 'https://app.example.com/cb/' + '€'.repeat(700);
+    const registered = [multiByteUri, multiByteUri + '/second'];
+
+    const result = lintOAuthClient(client({ redirectUris: registered }));
+
+    expect(registered.join('').length).toBeLessThan(OAUTH_CLIENT_LINT_BUDGET.maxRedirectUriBytes);
+    expect(Buffer.byteLength(registered.join(''), 'utf8')).toBeGreaterThan(
+      OAUTH_CLIENT_LINT_BUDGET.maxRedirectUriBytes
+    );
+    expect(result.redirectUris).toStrictEqual([multiByteUri]);
+    expect(result.truncated).toBe(true);
+    expect(result.redirectUriCount).toBe(2);
+  });
+
+  test('reads no redirect URI when the first one exceeds the byte ceiling, and does not call it unconfigured', () => {
+    const registered = ['https://app.example.com/cb/' + 'a'.repeat(OAUTH_CLIENT_LINT_BUDGET.maxRedirectUriBytes)];
+
+    const result = lintOAuthClient(client({ redirectUris: registered }));
+
+    expect(result.redirectUris).toStrictEqual([]);
+    expect(result.truncated).toBe(true);
+    expect(result.redirectUriCount).toBe(1);
+    expect(findingsForRule(result, 'OCS-005')).toStrictEqual([]);
+    expect(ruleIds(result)).toStrictEqual(['OCS-006']);
+    expect(result.status).toBe('warning');
+  });
+
+  test('emits no more findings than the finding ceiling allows for one client', () => {
+    const registered = Array.from(
+      { length: OAUTH_CLIENT_LINT_BUDGET.maxRedirectUris },
+      (_, index) => 'https://app' + index + '.example.com/?next=*'
+    );
+
+    const result = lintOAuthClient(client({ redirectUris: registered }), { partialRedirectMatchEnabled: true });
+
+    expect(result.findings.length).toBeLessThanOrEqual(OAUTH_CLIENT_LINT_BUDGET.maxFindings);
+    expect(result.redirectUris.length).toBeLessThan(OAUTH_CLIENT_LINT_BUDGET.maxRedirectUris);
+    expect(result.findings.filter((finding) => finding.ruleId !== 'OCS-006')).toHaveLength(
+      result.redirectUris.length * 3
+    );
+    expect(ruleIds(result).slice(0, 3)).toStrictEqual(['OCS-001', 'OCS-002', 'OCS-003']);
+    expect(onlyFindingForRule(result, 'OCS-006').status).toBe('warning');
+    expect(result.truncated).toBe(true);
+    expect(result.redirectUriCount).toBe(registered.length);
+    expect(result.status).toBe('fail');
+  });
+
+  test('never reports a truncated evaluation as free of risky patterns', () => {
+    const registered = [
+      ...Array.from(
+        { length: OAUTH_CLIENT_LINT_BUDGET.maxRedirectUris },
+        (_, index) => 'https://app' + index + '.example.com/oauth/callback'
+      ),
+      'https://app.example.com/*',
+    ];
+
+    const result = lintOAuthClient(client({ redirectUris: registered }));
+
+    expect(result.redirectUris).not.toContain('https://app.example.com/*');
+    expect(result.truncated).toBe(true);
+    expect(ruleIds(result)).toStrictEqual(['OCS-006']);
+    expect(onlyFindingForRule(result, 'OCS-006').reason).toBe(EVALUATION_TRUNCATED_REASON);
+    expect(onlyFindingForRule(result, 'OCS-006').remediation).toBe(EVALUATION_TRUNCATED_REMEDIATION);
+    expect(result.status).toBe('warning');
+  });
+
+  test('evaluates the same against a prepared registration index as against the entry list', () => {
+    const entries: RegistrationDiscoverableClient[] = [
+      { id: 'first-entry', redirectUris: ['https://first.example.com/cb'], source: 'built-in' },
+      { id: TEST_CLIENT_ID, redirectUris: ['https://second.example.com/cb'], source: 'config' },
+    ];
+    const index = indexRegistrationDiscoverableClients(entries);
+    const subjects = [
+      client({ id: TEST_CLIENT_ID, redirectUris: ['https://app.example.com/oauth/callback'] }),
+      client({ id: 'other-client', redirectUris: ['https://first.example.com/cb'] }),
+      client({ id: 'unmatched-client', redirectUris: ['https://app.example.com/oauth/callback'] }),
+    ];
+
+    for (const subject of subjects) {
+      expect(lintOAuthClient(subject, { registrationDiscoverableClients: index })).toStrictEqual(
+        lintOAuthClient(subject, { registrationDiscoverableClients: entries })
+      );
+    }
+
+    expect(index.entries).toStrictEqual(entries);
+    expect(ruleIds(lintOAuthClient(subjects[0], { registrationDiscoverableClients: index }))).toStrictEqual([
+      'OCS-004',
+    ]);
+    expect(ruleIds(lintOAuthClient(subjects[2], { registrationDiscoverableClients: index }))).toStrictEqual([]);
+  });
+
+  test('matches registration discoverable clients against the redirect URIs it read', () => {
+    const registered = bareOriginUris(OAUTH_CLIENT_LINT_BUDGET.maxRedirectUris + 1);
+    const subject = client({ redirectUris: registered });
+
+    const beyondCeiling = lintOAuthClient(subject, {
+      registrationDiscoverableClients: [
+        { id: 'unrelated-entry', redirectUris: [registered[registered.length - 1]], source: 'config' },
+      ],
+    });
+    const withinCeiling = lintOAuthClient(subject, {
+      registrationDiscoverableClients: [{ id: 'unrelated-entry', redirectUris: [registered[0]], source: 'config' }],
+    });
+
+    expect(beyondCeiling.truncated).toBe(true);
+    expect(findingsForRule(beyondCeiling, 'OCS-004')).toStrictEqual([]);
+    expect(withinCeiling.truncated).toBe(true);
+    expect(onlyFindingForRule(withinCeiling, 'OCS-004').redirectUri).toBe(registered[0]);
   });
 
   test('returns the same result twice and leaves both arguments unchanged', () => {
