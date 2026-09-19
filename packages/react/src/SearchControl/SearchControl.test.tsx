@@ -1426,4 +1426,167 @@ describe('SearchControl', () => {
       expect(screen.queryByText('No results')).not.toBeInTheDocument();
     });
   });
+
+  describe('Row region height reservation', () => {
+    const rowHeight = 37;
+    const pageSize = 20;
+    const originalGetBoundingClientRect = HTMLTableSectionElement.prototype.getBoundingClientRect;
+
+    const search: SearchRequest = {
+      resourceType: 'Patient',
+      count: pageSize,
+      offset: 0,
+      fields: ['id', 'name'],
+    };
+
+    /**
+     * Builds a search response page of distinct patients.
+     * @param count - The number of entries on the page.
+     * @param offset - The offset of the page, which also seeds the entry ids.
+     * @param total - The total number of matches across all pages.
+     * @returns A searchset Bundle of `count` patients.
+     */
+    function buildPage(count: number, offset: number, total: number): Bundle {
+      return {
+        resourceType: 'Bundle',
+        type: 'searchset',
+        total,
+        entry: Array.from({ length: count }, (_unused, index) => ({
+          resource: {
+            resourceType: 'Patient',
+            id: `patient-${offset + index}`,
+            name: [{ given: ['Patient'], family: `Number${offset + index}` }],
+          },
+        })),
+      };
+    }
+
+    function createDeferred(): { promise: Promise<Bundle>; resolve: (value: Bundle) => void } {
+      let resolve!: (value: Bundle) => void;
+      const promise = new Promise<Bundle>((res) => {
+        resolve = res;
+      });
+      return { promise, resolve };
+    }
+
+    beforeEach(() => {
+      // jsdom reports every element as zero-height, so the row region's geometry is stubbed from its rendered rows.
+      HTMLTableSectionElement.prototype.getBoundingClientRect = function (this: HTMLTableSectionElement): DOMRect {
+        const height = this.rows.length * rowHeight;
+        return {
+          x: 0,
+          y: 0,
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: height,
+          width: 0,
+          height,
+          toJSON: () => ({}),
+        };
+      };
+    });
+
+    afterEach(() => {
+      HTMLTableSectionElement.prototype.getBoundingClientRect = originalGetBoundingClientRect;
+    });
+
+    test('Full page reserves no height', async () => {
+      const medplum = new MockClient();
+      medplum.search = vi.fn().mockResolvedValue(buildPage(pageSize, 0, 27));
+
+      await setup({ search }, undefined, medplum);
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(pageSize);
+      expect(screen.queryByTestId('search-control-row-region-spacer')).not.toBeInTheDocument();
+    });
+
+    test('Short last page reserves the missing rows', async () => {
+      const medplum = new MockClient();
+      medplum.search = vi
+        .fn()
+        .mockResolvedValueOnce(buildPage(pageSize, 0, 27))
+        .mockResolvedValueOnce(buildPage(7, pageSize, 27));
+
+      const { rerender } = await setup({ search }, undefined, medplum);
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(pageSize);
+      expect(screen.queryByTestId('search-control-row-region-spacer')).not.toBeInTheDocument();
+
+      await rerender({ search: { ...search, offset: pageSize } });
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(7);
+      const spacer = screen.getByTestId('search-control-row-region-spacer');
+      // The 13 rows the short page does not render: 13 * 37 px.
+      expect(spacer.style.height).toBe('481px');
+    });
+
+    test('Reservation holds while the next page is in flight', async () => {
+      const nextPage = createDeferred();
+      const medplum = new MockClient();
+      medplum.search = vi
+        .fn()
+        .mockResolvedValueOnce(buildPage(pageSize, 0, 27))
+        .mockReturnValueOnce(nextPage.promise);
+
+      const { rerender } = await setup({ search }, undefined, medplum);
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(pageSize);
+
+      await rerender({ search: { ...search, offset: pageSize } });
+
+      expect(screen.getByTestId('search-control-loading-row')).toBeInTheDocument();
+      // The single loading row measures 37 px, so the remaining 19 rows' worth of height is held.
+      expect(screen.getByTestId('search-control-row-region-spacer').style.height).toBe('703px');
+
+      await act(async () => {
+        nextPage.resolve(buildPage(7, pageSize, 27));
+      });
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(7);
+      expect(screen.getByTestId('search-control-row-region-spacer').style.height).toBe('481px');
+    });
+
+    test('Short page reached directly reserves from the rendered rows', async () => {
+      const medplum = new MockClient();
+      medplum.search = vi.fn().mockResolvedValue(buildPage(7, pageSize, 27));
+
+      await setup({ search: { ...search, offset: pageSize } }, undefined, medplum);
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(7);
+      expect(screen.getByTestId('search-control-row-region-spacer').style.height).toBe('481px');
+    });
+
+    test('Single page result set renders no spacer', async () => {
+      const medplum = new MockClient();
+      medplum.search = vi.fn().mockResolvedValue(buildPage(7, 0, 7));
+
+      await setup({ search }, undefined, medplum);
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(7);
+      expect(screen.queryByTestId('search-control-row-region-spacer')).not.toBeInTheDocument();
+      expect(screen.getByRole('navigation', { name: /pagination/i })).toBeInTheDocument();
+    });
+
+    test('Spacer is hidden from assistive technology and rendered outside the table', async () => {
+      const medplum = new MockClient();
+      medplum.search = vi.fn().mockResolvedValue(buildPage(7, pageSize, 27));
+
+      await setup({ search: { ...search, offset: pageSize } }, undefined, medplum);
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(7);
+
+      const spacer = screen.getByTestId('search-control-row-region-spacer');
+      expect(spacer).toHaveAttribute('aria-hidden', 'true');
+
+      const table = screen.getByRole('table', { name: 'Patient search results' });
+      expect(table.contains(spacer)).toBe(false);
+      expect(table.querySelectorAll('tbody tr')).toHaveLength(7);
+
+      // The reservation sits between the table and the pagination landmark.
+      const nav = screen.getByRole('navigation', { name: /pagination/i });
+      expect(spacer.compareDocumentPosition(nav) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(spacer.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    });
+  });
 });

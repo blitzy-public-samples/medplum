@@ -3,13 +3,16 @@
 import type { MedplumSourceInfraConfig } from '@medplum/core';
 import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
-import { unlink, writeFile } from 'fs/promises';
-import { resolve } from 'path';
+import { mkdtemp, rm, unlink, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join, resolve } from 'path';
 import { normalizeInfraConfig } from './config';
 import { main, MedplumStack } from './index';
 
+let tempDir: string;
+
 async function writeConfig(filename: string, config: any): Promise<string> {
-  const resolvedPath = resolve(filename);
+  const resolvedPath = resolve(tempDir, filename);
   await writeFile(resolvedPath, JSON.stringify(config, null, 2), { encoding: 'utf-8' });
   return resolvedPath;
 }
@@ -42,6 +45,14 @@ describe('Infra', () => {
     clamscanLoggingBucket: 'medplum-logs-us-east-1',
     clamscanLoggingPrefix: 'clamscan',
   };
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'medplum-cdk-'));
+  });
+
+  afterAll(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
 
   beforeEach(() => {
     console.log = vi.fn();

@@ -207,6 +207,35 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
     loadResults();
   }, [loadResults]);
 
+  const rowRegionRef = useRef<HTMLTableSectionElement | null>(null);
+  const fullPageRowRegionHeightRef = useRef(0);
+  const [reservedRowRegionHeight, setReservedRowRegionHeight] = useState(0);
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    const rowRegion = rowRegionRef.current;
+    const searchResponse = state.searchResponse;
+    let reserved = 0;
+    if (rowRegion && searchResponse && rowRegion.rows.length > 0 && getTotalPages(memoizedSearch, searchResponse) > 1) {
+      const pageSize = memoizedSearch.count ?? DEFAULT_SEARCH_COUNT;
+      const height = rowRegion.getBoundingClientRect().height;
+      const loadingNewSearch = !!state.loadedSearch && !deepEquals(state.loadedSearch, memoizedSearch);
+      const dataRowCount = loadingNewSearch ? 0 : rowRegion.rows.length;
+      if (height > 0 && dataRowCount === pageSize) {
+        fullPageRowRegionHeightRef.current = height;
+      }
+      reserved = getReservedRowRegionHeight({
+        height,
+        dataRowCount,
+        fullPageHeight: fullPageRowRegionHeightRef.current,
+        pageSize,
+      });
+    }
+    if (Math.abs(reserved - reservedRowRegionHeight) > 0.5) {
+      setReservedRowRegionHeight(reserved);
+    }
+  });
+
   function handleSingleCheckboxClick(e: ChangeEvent, id: string): void {
     e.stopPropagation();
 
@@ -524,7 +553,7 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
             </Table.Tr>
           )}
         </Table.Thead>
-        <Table.Tbody>
+        <Table.Tbody ref={rowRegionRef}>
           {loadingNewSearch ? (
             <Table.Tr data-testid="search-control-loading-row">
               <Table.Td colSpan={columnCount}>
@@ -568,6 +597,14 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
           )}
         </Table.Tbody>
       </Table>
+      {reservedRowRegionHeight > 0 && (
+        <div
+          aria-hidden="true"
+          data-testid="search-control-row-region-spacer"
+          className={classes.rowRegionSpacer}
+          style={{ height: reservedRowRegionHeight }}
+        />
+      )}
       {!loadingNewSearch && !resources?.length && (
         <Container>
           <Center style={{ height: 150 }}>
@@ -705,6 +742,41 @@ function getColumnAriaSort(search: SearchRequest, field: SearchControlField): 'a
     return undefined;
   }
   return sortRule.descending ? 'descending' : 'ascending';
+}
+
+/** A post-layout measurement of the rendered row region, i.e. the table body that holds the result rows. */
+interface RowRegionMeasurement {
+  /** The measured height of the row region, in pixels. */
+  readonly height: number;
+  /** The number of result rows rendered in the row region, and 0 while a new search is in flight. */
+  readonly dataRowCount: number;
+  /** The most recently measured height of a full page of results, in pixels, and 0 when none has been measured. */
+  readonly fullPageHeight: number;
+  /** The number of results per page. */
+  readonly pageSize: number;
+}
+
+/**
+ * Returns the height to hold below the rendered result rows so that the row region spans a full page of results.
+ * @param measurement - The post-layout measurement of the row region.
+ * @returns The reservation height in pixels, maintaining `height + result === fullPageHeight` whenever a full-page
+ * height is known or can be derived from the rendered rows. Returns 0 when the row region has no measurable height,
+ * when it already spans a full page, and when no full-page height is known and none can be derived because no result
+ * row is rendered.
+ */
+function getReservedRowRegionHeight(measurement: RowRegionMeasurement): number {
+  const { height, dataRowCount, fullPageHeight, pageSize } = measurement;
+  if (height <= 0 || pageSize <= 0) {
+    return 0;
+  }
+  let referenceHeight = fullPageHeight;
+  if (referenceHeight <= 0) {
+    if (dataRowCount <= 0) {
+      return 0;
+    }
+    referenceHeight = (height / dataRowCount) * pageSize;
+  }
+  return Math.max(0, referenceHeight - height);
 }
 
 function getPage(search: SearchRequest): number {

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { notifications } from '@mantine/notifications';
 import { MockClient } from '@medplum/mock';
+import type { RenderResult } from '../test-utils/render';
 import { act, renderAppRoutes, screen, waitFor } from '../test-utils/render';
 
 type OAuthClientLintStatus = 'pass' | 'warning' | 'fail';
@@ -85,6 +86,8 @@ const ERROR_MESSAGE = 'OAuth security report unavailable';
 const NOT_VISIBLE_MESSAGE = 'This OAuth client is not visible in this project.';
 const MALFORMED_REPORT_MESSAGE = 'The OAuth client security report could not be read.';
 const INVALID_CLIENT_ID_MESSAGE = 'Invalid OAuth client id.';
+const PAGE_TITLE = 'OAuth Client Security Details | Medplum';
+const SENTINEL_TITLE = 'Medplum';
 
 const medplum = new MockClient();
 const originalGet = medplum.get.bind(medplum);
@@ -582,6 +585,8 @@ describe('OAuthClientSecurityDetailPage', () => {
     expect(screen.getByText('Back to OAuth Security')).toBeInTheDocument();
     expect(screen.queryByText('Partner Portal')).not.toBeInTheDocument();
     expect(screen.queryByText('completed')).not.toBeInTheDocument();
+    expect(document.querySelector(BADGE_SELECTOR)).toBeNull();
+    expect(screen.queryAllByRole('region')).toStrictEqual([]);
     expect(document.querySelector('.mantine-Loader-root')).toBeNull();
   });
 
@@ -638,6 +643,54 @@ describe('OAuthClientSecurityDetailPage', () => {
     } finally {
       consoleError.mockRestore();
     }
+  });
+
+  describe('Document title', () => {
+    test('Names the detail view in the document title while it is open, and restores the previous title on close', async () => {
+      const titleBeforeTest = document.title;
+      document.title = SENTINEL_TITLE;
+
+      try {
+        let visit!: RenderResult;
+        await act(async () => {
+          visit = renderAppRoutes(medplum, '/admin/oauth-security/' + CLIENT_ID);
+        });
+
+        expect(await screen.findByText('Partner Portal')).toBeInTheDocument();
+        expect(document.title).toBe(PAGE_TITLE);
+
+        await act(async () => {
+          visit.unmount();
+        });
+
+        expect(document.title).toBe(SENTINEL_TITLE);
+      } finally {
+        document.title = titleBeforeTest;
+      }
+    });
+
+    test('Names the detail view in the document title for a route parameter that is not a client id', async () => {
+      const titleBeforeTest = document.title;
+      document.title = SENTINEL_TITLE;
+
+      try {
+        let visit!: RenderResult;
+        await act(async () => {
+          visit = renderAppRoutes(medplum, '/admin/oauth-security/partner-portal');
+        });
+
+        expect(await screen.findByText(INVALID_CLIENT_ID_MESSAGE)).toBeInTheDocument();
+        expect(document.title).toBe(PAGE_TITLE);
+
+        await act(async () => {
+          visit.unmount();
+        });
+
+        expect(document.title).toBe(SENTINEL_TITLE);
+      } finally {
+        document.title = titleBeforeTest;
+      }
+    });
   });
 
   test('Renders the detail view and the admin OAuth Security tab link on a direct deep link', async () => {

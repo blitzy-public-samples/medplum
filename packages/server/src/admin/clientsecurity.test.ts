@@ -53,8 +53,14 @@ const BUILT_IN_SOURCE_REMEDIATION = 'The built-in client cannot be removed by co
 const FIXTURE_SECRET = 'redacted-fixture-client-secret';
 const FIXTURE_RETIRING_SECRET = 'redacted-fixture-retiring-secret';
 
-/** The maximum number of client applications the endpoint addresses in one request. */
-const MAX_REPORT_CLIENTS_PER_REQUEST = 200;
+/** The maximum number of client ids the endpoint accepts in one `_id` list. */
+const MAX_REPORT_CLIENT_IDS_PER_REQUEST = 200;
+
+/**
+ * The number of client ids whose comma-separated list carries the request line past the 16 KiB HTTP header budget of
+ * the server on its own, regardless of the size of the other request headers.
+ */
+const OVER_HEADER_BUDGET_ID_COUNT = 600;
 
 /** One entry of the `results` array, carrying `omittedFindings` when the response ceiling bounded its findings. */
 type ClientSecurityResult = OAuthClientLintResult & { readonly omittedFindings?: number };
@@ -84,22 +90,25 @@ const INVALID_ID_OUTCOME = 'Invalid _id search parameter';
 const INVALID_COUNT_OUTCOME = 'Invalid _count search parameter';
 const INVALID_OFFSET_OUTCOME = 'Invalid _offset search parameter';
 const OVER_LENGTH_ID_OUTCOME =
-  '_id search parameter exceeds maximum of ' + MAX_REPORT_CLIENTS_PER_REQUEST + ' client ids';
+  '_id search parameter exceeds maximum of ' + MAX_REPORT_CLIENT_IDS_PER_REQUEST + ' client ids';
 
 const REPEATED_COUNT_QUERY = '?_count=5&_count=6';
 const REPEATED_OFFSET_QUERY = '?_offset=1&_offset=2';
 const REPEATED_ID_QUERY = '?_id=' + randomUUID() + '&_id=' + randomUUID();
 const MIXED_ID_QUERY = '?_id=' + [randomUUID(), 'not-a-uuid', randomUUID()].join(',');
 const OVER_LENGTH_ID_LIST_QUERY =
-  '?_id=' + Array.from({ length: MAX_REPORT_CLIENTS_PER_REQUEST + 1 }, () => 'x').join(',');
+  '?_id=' + Array.from({ length: MAX_REPORT_CLIENT_IDS_PER_REQUEST + 1 }, () => 'x').join(',');
 
 /** An `_id` list of exactly the accepted maximum, addressing client ids that match nothing. */
 const MAX_LENGTH_ID_LIST_QUERY =
-  '?_id=' + Array.from({ length: MAX_REPORT_CLIENTS_PER_REQUEST }, () => randomUUID()).join(',');
+  '?_id=' + Array.from({ length: MAX_REPORT_CLIENT_IDS_PER_REQUEST }, () => randomUUID()).join(',');
 
 /** An `_id` list one value longer than the accepted maximum, carrying only well formed client ids. */
 const OVER_LENGTH_UUID_LIST_QUERY =
-  '?_id=' + Array.from({ length: MAX_REPORT_CLIENTS_PER_REQUEST + 1 }, () => randomUUID()).join(',');
+  '?_id=' + Array.from({ length: MAX_REPORT_CLIENT_IDS_PER_REQUEST + 1 }, () => randomUUID()).join(',');
+
+/** A `_count` several times the maximum search count, which is clamped rather than refused. */
+const FAR_ABOVE_MAX_SEARCH_COUNT_VALUE = (DEFAULT_MAX_SEARCH_COUNT * 5).toString();
 
 /** An unsigned integer above `Number.MAX_SAFE_INTEGER`, which `_count` clamps to the maximum search count. */
 const ABOVE_SAFE_INTEGER_VALUE = (BigInt(Number.MAX_SAFE_INTEGER) + 1n).toString();
@@ -115,28 +124,40 @@ const validationCases: ValidationCase[] = [
   { name: 'Non-numeric _count is rejected', query: '?_count=abc', status: 400, outcome: INVALID_COUNT_OUTCOME },
   { name: 'Repeated _count is rejected', query: REPEATED_COUNT_QUERY, status: 400, outcome: INVALID_COUNT_OUTCOME },
   {
-    name: 'A _count at the maximum clients per request is accepted unchanged',
-    query: '?_count=' + MAX_REPORT_CLIENTS_PER_REQUEST,
+    name: 'A _count below the maximum search count is accepted unchanged',
+    query: '?_count=' + MAX_REPORT_CLIENT_IDS_PER_REQUEST,
     status: 200,
-    count: MAX_REPORT_CLIENTS_PER_REQUEST,
+    count: MAX_REPORT_CLIENT_IDS_PER_REQUEST,
   },
   {
-    name: 'Oversized _count is clamped to the maximum clients per request',
-    query: '?_count=' + (MAX_REPORT_CLIENTS_PER_REQUEST + 1),
+    name: 'A _count above the maximum client ids per request is accepted unchanged',
+    query: '?_count=' + (MAX_REPORT_CLIENT_IDS_PER_REQUEST + 1),
     status: 200,
-    count: MAX_REPORT_CLIENTS_PER_REQUEST,
+    count: MAX_REPORT_CLIENT_IDS_PER_REQUEST + 1,
   },
   {
-    name: 'A _count at the maximum search count is clamped to the maximum clients per request',
+    name: 'A _count at the maximum search count is accepted unchanged',
     query: '?_count=' + DEFAULT_MAX_SEARCH_COUNT,
     status: 200,
-    count: MAX_REPORT_CLIENTS_PER_REQUEST,
+    count: DEFAULT_MAX_SEARCH_COUNT,
   },
   {
-    name: 'A _count above the safe integer ceiling is clamped to the maximum clients per request',
+    name: 'A _count one above the maximum search count is clamped to it',
+    query: '?_count=' + (DEFAULT_MAX_SEARCH_COUNT + 1),
+    status: 200,
+    count: DEFAULT_MAX_SEARCH_COUNT,
+  },
+  {
+    name: 'A _count far above the maximum search count is clamped to it',
+    query: '?_count=' + FAR_ABOVE_MAX_SEARCH_COUNT_VALUE,
+    status: 200,
+    count: DEFAULT_MAX_SEARCH_COUNT,
+  },
+  {
+    name: 'A _count above the safe integer ceiling is clamped to the maximum search count',
     query: '?_count=' + ABOVE_SAFE_INTEGER_VALUE,
     status: 200,
-    count: MAX_REPORT_CLIENTS_PER_REQUEST,
+    count: DEFAULT_MAX_SEARCH_COUNT,
   },
   { name: 'Absent _offset starts at the first client', query: '', status: 200, offset: 0 },
   { name: 'Empty _offset starts at the first client', query: '?_offset=', status: 200, offset: 0 },
@@ -160,19 +181,19 @@ const validationCases: ValidationCase[] = [
   },
   { name: 'Repeated _id is rejected', query: REPEATED_ID_QUERY, status: 400, outcome: INVALID_ID_OUTCOME },
   {
-    name: 'An _id list longer than the maximum clients per request is rejected',
+    name: 'An _id list longer than the maximum client ids per request is rejected',
     query: OVER_LENGTH_ID_LIST_QUERY,
     status: 400,
     outcome: OVER_LENGTH_ID_OUTCOME,
   },
   {
-    name: 'An _id list of well formed client ids longer than the maximum clients per request is rejected',
+    name: 'An _id list of well formed client ids longer than the maximum client ids per request is rejected',
     query: OVER_LENGTH_UUID_LIST_QUERY,
     status: 400,
     outcome: OVER_LENGTH_ID_OUTCOME,
   },
   {
-    name: 'An _id list at the maximum clients per request is accepted',
+    name: 'An _id list at the maximum client ids per request is accepted',
     query: MAX_LENGTH_ID_LIST_QUERY,
     status: 200,
     count: DEFAULT_SEARCH_COUNT,
@@ -260,6 +281,10 @@ function findingsOf(result: OAuthClientLintResult, ruleId: OAuthClientLintRuleId
 
 function sortedResultIds(report: ClientSecurityReport): string[] {
   return report.results.map((result) => result.id).sort((a, b) => a.localeCompare(b));
+}
+
+function sortedKeys(value: unknown): string[] {
+  return Object.keys(value as object).sort((a, b) => a.localeCompare(b));
 }
 
 let projectAdmin: RegisterResponse;
@@ -896,15 +921,15 @@ describe('OAuth client security endpoint', () => {
       expect(page).toHaveStatus(200);
 
       const pageReport = reportOf(page);
-      expect(pageReport.count).toStrictEqual(MAX_REPORT_CLIENTS_PER_REQUEST);
+      expect(pageReport.count).toStrictEqual(DEFAULT_MAX_SEARCH_COUNT);
       expect(pageReport.returned).toStrictEqual(fullIds.length);
 
       const pageIds = pageReport.results.map((result) => result.id);
       const fullPageOfIds = [
         ...pageIds,
-        ...Array.from({ length: MAX_REPORT_CLIENTS_PER_REQUEST - pageIds.length }, () => randomUUID()),
+        ...Array.from({ length: MAX_REPORT_CLIENT_IDS_PER_REQUEST - pageIds.length }, () => randomUUID()),
       ];
-      expect(fullPageOfIds).toHaveLength(MAX_REPORT_CLIENTS_PER_REQUEST);
+      expect(fullPageOfIds).toHaveLength(MAX_REPORT_CLIENT_IDS_PER_REQUEST);
 
       const byId = await readReport(pagingProjectId, pagingAccessToken, '?_id=' + fullPageOfIds.join(','));
       expect(byId).toHaveStatus(200);
@@ -935,10 +960,12 @@ describe('OAuth client security endpoint', () => {
       expect(report.total).toStrictEqual(fullIds.length);
     });
 
-    test('Page at the repository offset ceiling is returned and a page within the result set past it is refused', async () => {
+    test('With the offset ceiling lowered, the page at it is served and a page past it inside the result set is refused', async () => {
       const previousMaxSearchOffset = getConfig().maxSearchOffset;
       getConfig().maxSearchOffset = 2;
       try {
+        expect(getConfig().maxSearchOffset).toBeLessThan(fullIds.length);
+
         const atCeiling = await readReport(pagingProjectId, pagingAccessToken, '?_count=2&_offset=2');
         expect(atCeiling).toHaveStatus(200);
 
@@ -954,7 +981,7 @@ describe('OAuth client security endpoint', () => {
         expect(withinResultSet.body.issue[0].code).toStrictEqual('invalid');
         expect(withinResultSet.body.issue[0].details.text).toStrictEqual(
           '_offset search parameter exceeds the maximum supported offset of 2; request an offset of at most 2, or name up to ' +
-            MAX_REPORT_CLIENTS_PER_REQUEST +
+            MAX_REPORT_CLIENT_IDS_PER_REQUEST +
             ' client ids with _id'
         );
         expect(withinResultSet.body.results).toBeUndefined();
@@ -1033,6 +1060,35 @@ describe('OAuth client security endpoint', () => {
       if (unfiltered) {
         expect(sortedResultIds(reportOf(res))).toStrictEqual(allIds);
       }
+    });
+
+    test('An _id list at the maximum is served and one above it is refused with the maximum in the message', async () => {
+      const accepted = await readReport(
+        validationProjectId,
+        validationAccessToken,
+        '?_id=' + Array.from({ length: MAX_REPORT_CLIENT_IDS_PER_REQUEST }, () => randomUUID()).join(',')
+      );
+      expect(accepted).toHaveStatus(200);
+      expect(reportOf(accepted).total).toStrictEqual(0);
+
+      const refused = await readReport(
+        validationProjectId,
+        validationAccessToken,
+        '?_id=' + Array.from({ length: MAX_REPORT_CLIENT_IDS_PER_REQUEST + 1 }, () => randomUUID()).join(',')
+      );
+      expect(refused).toHaveStatus(400);
+      expect(refused.body.issue[0].details.text).toStrictEqual(OVER_LENGTH_ID_OUTCOME);
+      expect(refused.body.results).toBeUndefined();
+    });
+
+    test('An _id list past the HTTP header budget is refused by the HTTP server with a bodyless 431', async () => {
+      const query = '?_id=' + Array.from({ length: OVER_HEADER_BUDGET_ID_COUNT }, () => randomUUID()).join(',');
+      expect(query.length).toBeGreaterThan(16 * 1024);
+
+      const res = await readReport(validationProjectId, validationAccessToken, query);
+      expect(res).toHaveStatus(431);
+      expect(res.text).toStrictEqual('');
+      expect(res.body).toStrictEqual({});
     });
   });
 
@@ -1140,6 +1196,74 @@ describe('OAuth client security endpoint', () => {
       expect(sortedResultIds(reportOf(decorated))).toStrictEqual(sortedResultIds(reportOf(plain)));
       expect(reportOf(decorated).total).toStrictEqual(reportOf(plain).total);
       expect(sortedResultIds(reportOf(decorated))).not.toContain(otherClient.id);
+    });
+  });
+
+  describe('Response envelope', () => {
+    /** The keys every report response carries, sorted. */
+    const REPORT_KEYS = ['count', 'offset', 'results', 'returned', 'total', 'truncated'];
+
+    /** The keys every entry of `results` carries, sorted. */
+    const RESULT_KEYS = ['findings', 'id', 'name', 'redirectUris', 'status'];
+
+    let envelopeProjectId: string;
+    let envelopeAccessToken: string;
+    let envelopeClientId: string;
+
+    beforeAll(async () => {
+      const envelope = await createTestProject({
+        membership: { admin: true },
+        withAccessToken: true,
+        withRepo: true,
+      });
+      envelopeProjectId = envelope.project.id;
+      envelopeAccessToken = envelope.accessToken;
+
+      const envelopeClient = await withTestContext(() =>
+        envelope.repo.createResource(clientFixture('Envelope Client', [BARE_ORIGIN_URI]))
+      );
+      envelopeClientId = envelopeClient.id;
+    });
+
+    test('Report of a populated project carries exactly the envelope keys and the result keys', async () => {
+      const res = await readReport(envelopeProjectId, envelopeAccessToken, '?_id=' + envelopeClientId);
+      expect(res).toHaveStatus(200);
+      expect(sortedKeys(res.body)).toStrictEqual(REPORT_KEYS);
+
+      const report = reportOf(res);
+      expect(report.total).toStrictEqual(1);
+      expect(report.offset).toStrictEqual(0);
+      expect(report.count).toStrictEqual(DEFAULT_SEARCH_COUNT);
+      expect(report.returned).toStrictEqual(1);
+      expect(report.truncated).toBe(false);
+      expect(sortedKeys(report.results[0])).toStrictEqual(RESULT_KEYS);
+    });
+
+    test('Report that serves no client carries the same envelope keys', async () => {
+      const res = await readReport(envelopeProjectId, envelopeAccessToken, '?_id=' + randomUUID());
+      expect(res).toHaveStatus(200);
+      expect(sortedKeys(res.body)).toStrictEqual(REPORT_KEYS);
+
+      const report = reportOf(res);
+      expect(report.total).toStrictEqual(0);
+      expect(report.returned).toStrictEqual(0);
+      expect(report.truncated).toBe(false);
+      expect(report.results).toStrictEqual([]);
+    });
+
+    test('Report beyond the result set carries the same envelope keys', async () => {
+      const res = await readReport(envelopeProjectId, envelopeAccessToken, '?_offset=10');
+      expect(res).toHaveStatus(200);
+      expect(sortedKeys(res.body)).toStrictEqual(REPORT_KEYS);
+      expect(reportOf(res).offset).toStrictEqual(10);
+      expect(reportOf(res).results).toStrictEqual([]);
+    });
+
+    test('Refused request carries an OperationOutcome rather than an envelope', async () => {
+      const res = await readReport(envelopeProjectId, envelopeAccessToken, '?_count=0');
+      expect(res).toHaveStatus(400);
+      expect(res.body.resourceType).toStrictEqual('OperationOutcome');
+      expect(sortedKeys(res.body)).not.toContain('results');
     });
   });
 

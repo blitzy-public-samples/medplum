@@ -21,6 +21,9 @@ const DETAILS_COLUMN_INDEX = 3;
 const COLUMN_HEADERS = ['Name', 'Security', 'Redirect URIs', 'Details'];
 const SECURITY_RESERVATION_SELECTOR = '[data-testid="security-status"]';
 const DETAIL_LINK_TEXT = 'Review';
+const DETAIL_LINK_UNDERLINE = 'not-hover';
+const PAGE_TITLE = 'OAuth Client Security | Medplum';
+const SENTINEL_TITLE = 'Medplum';
 const STATUS_BADGE_HEIGHT = 20;
 const WIDEST_STATUS_BADGE_WIDTH = 74;
 
@@ -902,6 +905,21 @@ describe('OAuthClientSecurityPage', () => {
       expect(screen.getByText('Back to OAuth Security')).toBeInTheDocument();
       expect(lintCallUrls()[1]).toContain('_id=' + idFor(WILDCARD_CLIENT_NAME));
     });
+
+    test('Underlines the detail link of every row at rest, so it is not distinguished by colour alone', async () => {
+      await setup();
+
+      await waitFor(() => {
+        expect(getSecurityCellText(WILDCARD_CLIENT_NAME)).toBe('fail');
+      });
+
+      expect(getDetailLink(WILDCARD_CLIENT_NAME)).toHaveAttribute('data-underline', DETAIL_LINK_UNDERLINE);
+      const names = renderedClientNames();
+      expect(names).toHaveLength(DEFAULT_SEARCH_COUNT);
+      for (const name of names) {
+        expect(getDetailLink(name)).toHaveAttribute('data-underline', DETAIL_LINK_UNDERLINE);
+      }
+    });
   });
 
   describe('Security status settling', () => {
@@ -1226,6 +1244,53 @@ describe('OAuthClientSecurityPage', () => {
       }
       expect(screen.getByText(LEGACY_REDIRECT_URI)).toBeInTheDocument();
       expect(skeletonCount()).toBe(0);
+    });
+  });
+
+  describe('Document title', () => {
+    test('Names the review in the document title while it is open, and restores the previous title on close', async () => {
+      const titleBeforeTest = document.title;
+      document.title = SENTINEL_TITLE;
+
+      try {
+        const visit = renderAppRoutes(medplum, '/admin/oauth-security');
+
+        await waitFor(() => {
+          expect(getSecurityCellText(WILDCARD_CLIENT_NAME)).toBe('fail');
+        });
+
+        expect(document.title).toBe(PAGE_TITLE);
+
+        await act(async () => {
+          visit.unmount();
+        });
+
+        expect(document.title).toBe(SENTINEL_TITLE);
+      } finally {
+        document.title = titleBeforeTest;
+      }
+    });
+
+    test('Names the review in the document title for a non-administrator who is refused the data', async () => {
+      vi.spyOn(medplum, 'isProjectAdmin').mockImplementation(() => false);
+      vi.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => false);
+      const titleBeforeTest = document.title;
+      document.title = SENTINEL_TITLE;
+
+      try {
+        const visit = renderAppRoutes(medplum, '/admin/oauth-security');
+
+        expect(await screen.findByText('Forbidden')).toBeInTheDocument();
+        expect(document.title).toBe(PAGE_TITLE);
+
+        await act(async () => {
+          visit.unmount();
+        });
+
+        expect(document.title).toBe(SENTINEL_TITLE);
+      } finally {
+        document.title = titleBeforeTest;
+      }
     });
   });
 

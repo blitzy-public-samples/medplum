@@ -42,6 +42,8 @@ type OAuthClientLintDetailState =
 
 const LIST_PATH = '/admin/oauth-security';
 
+const PAGE_TITLE = 'OAuth Client Security Details | Medplum';
+
 const LOADING_STATE: OAuthClientLintDetailState = { kind: 'loading' };
 
 const NOT_VISIBLE_STATE: OAuthClientLintDetailState = { kind: 'not-visible' };
@@ -109,10 +111,6 @@ function isLintResult(value: unknown): value is OAuthClientLintResult {
     Array.isArray(value.findings) &&
     value.findings.every(isLintFinding)
   );
-}
-
-function getStatusColor(colors: Record<OAuthClientLintStatus, string>, status: string): string {
-  return isLintStatus(status) ? colors[status] : colors.fail;
 }
 
 function getMalformedReportState(): OAuthClientLintDetailState {
@@ -189,7 +187,7 @@ function OutcomeMessage({ outcome }: { readonly outcome: OperationOutcome }): JS
 function FindingAlert({ finding }: { readonly finding: OAuthClientLintFinding }): JSX.Element {
   return (
     <Alert
-      color={getStatusColor(ALERT_COLORS, finding.status)}
+      color={ALERT_COLORS[finding.status]}
       c={SEVERITY_TEXT_COLOR}
       title={escapeBidiControls(finding.ruleId)}
       role="region"
@@ -256,7 +254,7 @@ function OAuthClientSecurityDetail({ clientId }: { readonly clientId: string }):
         </Title>
         <StatusBadge
           status={result.status}
-          color={getStatusColor(BADGE_COLORS, result.status)}
+          color={BADGE_COLORS[result.status]}
           variant={BADGE_VARIANT}
           c={SEVERITY_TEXT_COLOR}
           aria-label={STATUS_LABEL_PREFIX + result.status}
@@ -286,6 +284,14 @@ function OAuthClientSecurityDetail({ clientId }: { readonly clientId: string }):
  */
 export function OAuthClientSecurityDetailPage(): JSX.Element {
   const { clientId } = useParams() as { clientId: string };
+
+  useEffect(() => {
+    const previousTitle = document.title;
+    document.title = PAGE_TITLE;
+    return () => {
+      document.title = previousTitle;
+    };
+  }, []);
 
   if (!isUUID(clientId)) {
     return <OutcomeMessage outcome={INVALID_CLIENT_ID_OUTCOME} />;

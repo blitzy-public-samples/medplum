@@ -4,6 +4,7 @@ import type { Filter, SearchRequest, WithId } from '@medplum/core';
 import {
   badRequest,
   contentTooLarge,
+  DEFAULT_MAX_SEARCH_COUNT,
   DEFAULT_SEARCH_COUNT,
   forbidden,
   getStatus,
@@ -32,10 +33,11 @@ const UNSIGNED_INTEGER_PATTERN = /^\d+$/;
 const REPORT_QUERY_PARAMS = ['_id', '_count', '_offset'] as const;
 
 /**
- * The maximum number of client applications one report request addresses. `_count` is clamped to this value, and an
- * `_id` list longer than this is refused with `badRequest`.
+ * The maximum number of client ids one report request names with `_id`. A longer list is refused with `badRequest`.
+ * An `_id` list long enough to carry the request line past the HTTP header budget of the server is refused by the
+ * HTTP server itself, before this handler runs, with a bodyless HTTP 431.
  */
-const MAX_REPORT_CLIENTS_PER_REQUEST = 200;
+const MAX_REPORT_CLIENT_IDS_PER_REQUEST = 200;
 
 /**
  * The maximum serialized size, in UTF-8 bytes, of one report response. A client evaluation that does not fit within
@@ -56,6 +58,28 @@ interface BoundedOAuthClientLintResult extends OAuthClientLintResult {
 
 /** One entry of the `results` array of a report response. */
 type ReportResult = OAuthClientLintResult | BoundedOAuthClientLintResult;
+
+/**
+ * The body of one report response. Every response this handler sends carries exactly these six members; a refused
+ * request carries an `OperationOutcome` instead.
+ */
+interface OAuthClientSecurityReport {
+  /** The number of client applications the search matched, independent of `count` and `offset`. */
+  readonly total: number;
+  /** The normalized `_offset` the search used. */
+  readonly offset: number;
+  /** The normalized `_count` the search used. */
+  readonly count: number;
+  /** The number of entries in `results`, which is at most `count`. */
+  readonly returned: number;
+  /** True when {@link MAX_REPORT_RESPONSE_BYTES} cut the page short or bounded the findings of its last entry. */
+  readonly truncated: boolean;
+  /**
+   * One evaluation per client application the page serves, in search order. Each entry carries `id`, `name`,
+   * `redirectUris`, `status` and `findings`, and additionally `omittedFindings` when its findings were bounded.
+   */
+  readonly results: ReportResult[];
+}
 
 /** The `setting` list of the project a report describes. */
 interface ReportedProjectSetting {
@@ -85,7 +109,7 @@ function parseCountParam(raw: string | null): number | undefined {
   if (count < 1) {
     return undefined;
   }
-  return Math.min(count, MAX_REPORT_CLIENTS_PER_REQUEST);
+  return Math.min(count, DEFAULT_MAX_SEARCH_COUNT);
 }
 
 function parseOffsetParam(raw: string | null): number | undefined {
@@ -208,7 +232,8 @@ function boundResultFindings(
  * @param count - The normalized `_count` of the request.
  */
 function sendEmptyReport(res: Response, total: number, offset: number, count: number): void {
-  res.json({ total, offset, count, returned: 0, truncated: false, results: [] });
+  const report: OAuthClientSecurityReport = { total, offset, count, returned: 0, truncated: false, results: [] };
+  res.json(report);
 }
 
 function buildRegistrationDiscoverableClients(): RegistrationDiscoverableClient[] {
@@ -233,6 +258,25 @@ function buildRegistrationDiscoverableClients(): RegistrationDiscoverableClient[
 
 /**
  * Handles requests to "GET /admin/projects/{projectId}/oauth-security".
+ *
+ * Three query parameters are read and every other one is ignored:
+ *
+ * - `_id` — one comma-separated list of at most {@link MAX_REPORT_CLIENT_IDS_PER_REQUEST} client ids. Empty segments
+ *   are discarded, and a list that reduces to nothing names no client in particular.
+ * - `_count` — the page size. Absent or empty it is {@link DEFAULT_SEARCH_COUNT}; a larger value than
+ *   {@link DEFAULT_MAX_SEARCH_COUNT} is clamped to it, so the normalized value is always 1 to
+ *   {@link DEFAULT_MAX_SEARCH_COUNT}.
+ * - `_offset` — the first client of the page, 0 when absent or empty, and never clamped.
+ *
+ * A repeated, bracketed or otherwise malformed value of any of the three, and an `_id` list above the maximum, are
+ * refused with `badRequest`. An `_offset` within the matched result set but above the configured `maxSearchOffset` is
+ * refused with `badRequest` naming `_id` as the way to reach those clients, while an `_offset` at or beyond the
+ * matched total serves an empty report. A request line long enough to exceed the HTTP header budget of the server —
+ * which an `_id` list of a few hundred ids reaches — is refused by the HTTP server itself, before this handler runs,
+ * with a bodyless HTTP 431.
+ *
+ * A successful request responds with an {@link OAuthClientSecurityReport}: `total`, `offset`, `count`, `returned`,
+ * `truncated` and `results`. A single evaluation too large to serve at all is refused with `contentTooLarge`.
  * @param req - The request.
  * @param res - The response.
  */
@@ -256,10 +300,10 @@ export async function clientSecurityHandler(req: Request, res: Response): Promis
   let ids: string[] | undefined;
   if (rawIds) {
     const requestedIds = rawIds.split(',').filter((id) => id !== '');
-    if (requestedIds.length > MAX_REPORT_CLIENTS_PER_REQUEST) {
+    if (requestedIds.length > MAX_REPORT_CLIENT_IDS_PER_REQUEST) {
       sendOutcome(
         res,
-        badRequest('_id search parameter exceeds maximum of ' + MAX_REPORT_CLIENTS_PER_REQUEST + ' client ids')
+        badRequest('_id search parameter exceeds maximum of ' + MAX_REPORT_CLIENT_IDS_PER_REQUEST + ' client ids')
       );
       return;
     }
@@ -326,7 +370,7 @@ export async function clientSecurityHandler(req: Request, res: Response): Promis
           '; request an offset of at most ' +
           maxSearchOffset +
           ', or name up to ' +
-          MAX_REPORT_CLIENTS_PER_REQUEST +
+          MAX_REPORT_CLIENT_IDS_PER_REQUEST +
           ' client ids with _id'
       )
     );
@@ -387,5 +431,6 @@ export async function clientSecurityHandler(req: Request, res: Response): Promis
     break;
   }
 
-  res.json({ total, offset, count, returned: results.length, truncated, results });
+  const report: OAuthClientSecurityReport = { total, offset, count, returned: results.length, truncated, results };
+  res.json(report);
 }

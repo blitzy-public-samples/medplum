@@ -21,6 +21,11 @@
   }
 }
 
+.rowRegionSpacer {
+  flex: none;
+  pointer-events: none;
+}
+
 .th {
   padding: 0 !important;
 }

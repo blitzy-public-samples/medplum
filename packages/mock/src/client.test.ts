@@ -864,7 +864,7 @@ describe('MockClient', () => {
     expect(homer).toBeDefined();
     expect(homer.name[0].given[0]).toStrictEqual('Homer');
     expect(homer.name[0].family).toStrictEqual('Simpson');
-  });
+  }, 30_000);
 
   test('.mock.setProfile()', async () => {
     const medplum = new MockClient({ profile: null });

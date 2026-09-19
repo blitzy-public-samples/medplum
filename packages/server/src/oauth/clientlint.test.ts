@@ -10,7 +10,7 @@ import type {
   OAuthClientLintStatus,
   RegistrationDiscoverableClient,
 } from './clientlint';
-import { lintOAuthClient } from './clientlint';
+import { lintOAuthClient, OAuthClientLintRule } from './clientlint';
 
 const TEST_CLIENT_ID = 'test-client';
 
@@ -264,6 +264,64 @@ const copyCases: {
     expectedRemediation: UNPARSEABLE_REDIRECT_URI_REMEDIATION,
   },
 ];
+
+/** One subject per declared rule identifier, which together exercise every identifier the evaluator emits. */
+const ruleCoverageCases: {
+  ruleId: OAuthClientLintRuleId;
+  subject: WithId<ClientApplication>;
+  options?: OAuthClientLintOptions;
+}[] = [
+  { ruleId: 'OCS-001', subject: client({ redirectUris: ['https://app.example.com'] }) },
+  { ruleId: 'OCS-002', subject: client({ redirectUris: ['https://app.example.com/*'] }) },
+  {
+    ruleId: 'OCS-003',
+    subject: client({ redirectUris: [EXACT_CALLBACK_URI] }),
+    options: { partialRedirectMatchEnabled: true },
+  },
+  {
+    ruleId: 'OCS-004',
+    subject: client({ redirectUris: [EXACT_CALLBACK_URI] }),
+    options: { registrationDiscoverableClients: [{ id: TEST_CLIENT_ID, redirectUris: [], source: 'config' }] },
+  },
+  { ruleId: 'OCS-005', subject: client() },
+  { ruleId: 'OCS-006', subject: client({ redirectUris: ['not a url'] }) },
+];
+
+function declaredRuleIds(): OAuthClientLintRuleId[] {
+  return Object.values(OAuthClientLintRule)
+    .slice()
+    .sort((a, b) => a.localeCompare(b));
+}
+
+describe('OAuthClientLintRule', () => {
+  test('declares exactly the six rule identifiers of the rule set', () => {
+    expect(OAuthClientLintRule).toStrictEqual({
+      BareOrigin: 'OCS-001',
+      Wildcard: 'OCS-002',
+      PrefixMatchingEnabled: 'OCS-003',
+      RegistrationDiscoverable: 'OCS-004',
+      NoRedirectUri: 'OCS-005',
+      UnparseableRedirectUri: 'OCS-006',
+    });
+    expect(declaredRuleIds()).toStrictEqual(['OCS-001', 'OCS-002', 'OCS-003', 'OCS-004', 'OCS-005', 'OCS-006']);
+  });
+
+  test.each(ruleCoverageCases)('emits $ruleId and no undeclared rule identifier', (testCase) => {
+    const declared: string[] = declaredRuleIds();
+    const emitted = ruleIds(lintOAuthClient(testCase.subject, testCase.options));
+
+    expect(emitted).toContain(testCase.ruleId);
+    expect(emitted.filter((ruleId) => !declared.includes(ruleId))).toStrictEqual([]);
+  });
+
+  test('declares no rule identifier the evaluator cannot emit', () => {
+    const emitted = new Set(
+      ruleCoverageCases.flatMap((testCase) => ruleIds(lintOAuthClient(testCase.subject, testCase.options)))
+    );
+
+    expect(Array.from(emitted).sort((a, b) => a.localeCompare(b))).toStrictEqual(declaredRuleIds());
+  });
+});
 
 describe('lintOAuthClient', () => {
   test.each(['https://app.example.com', 'https://app.example.com/', 'https://app.example.com/?next=x'])(

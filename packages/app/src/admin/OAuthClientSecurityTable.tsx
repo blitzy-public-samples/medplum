@@ -140,16 +140,13 @@ function parseSecurityReport(response: unknown): { report?: OAuthClientLintRepor
   };
 }
 
-function getStatusColor(status: string): string {
-  return isLintStatus(status) ? STATUS_COLORS[status] : STATUS_COLORS.fail;
-}
-
 const SECURITY_CELL_MIN_WIDTH = rem(80);
 const SECURITY_CELL_MIN_HEIGHT = rem(22);
 const STATUS_PLACEHOLDER_HEIGHT = 20;
 const STATUS_PLACEHOLDER_WIDTH = 74;
 const DETAIL_PATH_PREFIX = '/admin/oauth-security/';
 const DETAIL_LINK_TEXT = 'Review';
+const DETAIL_LINK_UNDERLINE = 'not-hover';
 const CELL_TEXT_STYLE: CSSProperties = { overflowWrap: 'anywhere' };
 
 function renderEmptyCell(): JSX.Element {
@@ -302,7 +299,7 @@ export function OAuthClientSecurityTable(): JSX.Element {
             return renderSecurityCell(
               <StatusBadge
                 status={status}
-                color={getStatusColor(status)}
+                color={STATUS_COLORS[status]}
                 variant={STATUS_VARIANT}
                 c={STATUS_LABEL_COLOR}
               />
@@ -349,6 +346,7 @@ export function OAuthClientSecurityTable(): JSX.Element {
               to={`${DETAIL_PATH_PREFIX}${clientId}`}
               label={`${DETAIL_LINK_TEXT} ${escapeBidiControls(name ?? clientId)}`}
               size="sm"
+              underline={DETAIL_LINK_UNDERLINE}
             >
               {DETAIL_LINK_TEXT}
             </MedplumLink>

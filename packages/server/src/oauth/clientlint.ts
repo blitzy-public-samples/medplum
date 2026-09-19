@@ -10,14 +10,24 @@ import { getClientRedirectUris } from './clients';
 export type OAuthClientLintStatus = 'pass' | 'warning' | 'fail';
 
 /**
- * Rule identifiers that {@link lintOAuthClient} can emit.
+ * The complete set of rule identifiers {@link lintOAuthClient} can emit, and the condition each one reports. Every
+ * finding carries one of these six identifiers; no other identifier is ever emitted.
  */
 export const OAuthClientLintRule = {
+  /** A registered redirect URI that parses as an origin with no callback path on a non-loopback host. */
   BareOrigin: 'OCS-001',
+  /** A registered redirect URI whose stored value contains a wildcard character. */
   Wildcard: 'OCS-002',
+  /** A parseable registered redirect URI the project accepts as a text prefix rather than as an exact string. */
   PrefixMatchingEnabled: 'OCS-003',
+  /** A client id or registered redirect URI that also identifies or addresses a standard OAuth client. */
   RegistrationDiscoverable: 'OCS-004',
+  /** No redirect URI is configured, so no redirect URI rule applies. Always `pass`. */
   NoRedirectUri: 'OCS-005',
+  /**
+   * A registered entry the redirect URI rules cannot be applied to: one stored as something other than a string, or
+   * one no absolute URL can be parsed from.
+   */
   UnparseableRedirectUri: 'OCS-006',
 } as const;
 
