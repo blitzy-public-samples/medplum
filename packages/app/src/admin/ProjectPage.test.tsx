@@ -6,7 +6,9 @@ import { act, fireEvent, renderAppRoutes, screen } from '../test-utils/render';
 const medplum = new MockClient();
 
 async function setup(url: string): Promise<void> {
-  renderAppRoutes(medplum, url);
+  await act(async () => {
+    renderAppRoutes(medplum, url);
+  });
 }
 
 describe('ProjectPage', () => {

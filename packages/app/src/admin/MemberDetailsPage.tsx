@@ -3,8 +3,7 @@
 import { Alert, Button, Group, Title } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
 import { normalizeErrorString } from '@medplum/core';
-import type { User } from '@medplum/fhirtypes';
-import { Loading, MedplumLink, ResourceTable, useMedplum, useResource } from '@medplum/react';
+import { Loading, MedplumLink, ResourceTable, useMedplum, useResource, useSearchOne } from '@medplum/react';
 import type { JSX } from 'react';
 import { useCallback } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router';
@@ -30,10 +29,10 @@ export function MemberDetailsPage(): JSX.Element {
   const isAdmin = medplum.getProjectMembership()?.admin;
   const membership = medplum.readResource('ProjectMembership', membershipId).read();
   const profile = useResource(membership.profile);
-  const userRef = membership.user?.reference?.startsWith('User/')
-    ? { reference: membership.user.reference }
+  const userId = membership.user?.reference?.startsWith('User/')
+    ? membership.user.reference.slice('User/'.length)
     : undefined;
-  const user = useResource<User>(userRef);
+  const [user] = useSearchOne('User', { _id: userId ?? '' }, { enabled: userId !== undefined });
   const isOwner = medplum.getProject()?.owner?.reference === membership.user?.reference;
 
   const listPath = getMemberListPath(location.pathname);

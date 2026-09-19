@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createFakeJwt } from '@medplum/mock';
 import { initApp } from './index';
-import { screen, waitFor } from './test-utils/render';
+import { act, screen, waitFor } from './test-utils/render';
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -67,13 +67,15 @@ describe('App Index', () => {
     const root = document.createElement('div');
     root.id = 'root';
     document.body.appendChild(root);
-    await initApp();
+    await act(async () => {
+      await initApp();
+    });
 
     // createBrowserRouter + jsdom does not reliably complete HomePage URL redirects, so verify
     // initApp mounted an authenticated App shell instead of search-control specifically.
     await waitFor(
       () => {
-        expect(screen.getByRole('button', { name: 'User menu' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /User menu/ })).toBeInTheDocument();
         expect(screen.getByTitle('Medplum Logo')).toBeInTheDocument();
       },
       { timeout: 5000 }

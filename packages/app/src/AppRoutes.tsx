@@ -9,6 +9,8 @@ import { CreateClientPage } from './admin/CreateClientPage';
 import { DatabaseToolsPage } from './admin/DatabaseToolsPage';
 import { InvitePage } from './admin/InvitePage';
 import { MemberDetailsPage } from './admin/MemberDetailsPage';
+import { OAuthClientSecurityDetailPage } from './admin/OAuthClientSecurityDetailPage';
+import { OAuthClientSecurityPage } from './admin/OAuthClientSecurityPage';
 import { ProjectAdminConfigPage } from './admin/ProjectAdminConfigPage';
 import { ProjectDetailsPage } from './admin/ProjectDetailsPage';
 import { ProjectPage } from './admin/ProjectPage';
@@ -29,6 +31,7 @@ import { HomePage } from './HomePage';
 import { AssaysPage } from './lab/AssaysPage';
 import { PanelsPage } from './lab/PanelsPage';
 import { MfaPage } from './MfaPage';
+import { NotFoundPage } from './NotFoundPage';
 import { OAuthPage } from './OAuthPage';
 import { RegisterPage } from './RegisterPage';
 import { ResetPasswordPage } from './ResetPasswordPage';
@@ -99,6 +102,8 @@ export function AppRoutes(): JSX.Element {
           <Route path="clients" element={<ClientsPage />} />
           <Route path="details" element={<ProjectDetailsPage />} />
           <Route path="invite" element={<InvitePage />} />
+          <Route path="oauth-security/:clientId" element={<OAuthClientSecurityDetailPage />} />
+          <Route path="oauth-security" element={<OAuthClientSecurityPage />} />
           <Route path="patients" element={<Navigate to="/admin/users" replace />} />
           <Route path="users/:membershipId" element={<MemberDetailsPage />} />
           <Route path="users" element={<UsersPage />} />
@@ -155,6 +160,7 @@ export function AppRoutes(): JSX.Element {
         </Route>
         <Route path="/:resourceType" element={<HomePage />} />
         <Route path="/" element={<HomePage />} />
+        <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes>
   );

@@ -15,6 +15,7 @@ import {
   getRateLimitReset,
   getStatus,
   gone,
+  internalServerError,
   isAccepted,
   isCreated,
   isError,
@@ -27,12 +28,14 @@ import {
   normalizeErrorString,
   notFound,
   notModified,
+  OperationOutcomeError,
   operationOutcomeToString,
   preconditionFailed,
   redirect,
   redirectOk,
   serverError,
   serverTimeout,
+  serverUnavailable,
   setRateLimitReset,
   tooManyRequests,
   unauthorized,
@@ -130,9 +133,85 @@ describe('Outcomes', () => {
     [businessRule('rule-id', 'Message'), 422],
     [tooManyRequests, 429],
     [serverError(new Error('bad')), 500],
+    [internalServerError(), 500],
+    [serverUnavailable(), 503],
     [serverTimeout(), 504],
   ])('getStatus(%p) == %i', (outcome, expectedStatus) => {
     expect(getStatus(outcome)).toStrictEqual(expectedStatus);
+  });
+
+  test('Internal server error', () => {
+    const outcome = internalServerError();
+    expect(isOk(outcome)).toBe(false);
+    expect(outcome).toStrictEqual({
+      resourceType: 'OperationOutcome',
+      issue: [
+        {
+          severity: 'error',
+          code: 'exception',
+          details: { text: 'Internal server error' },
+        },
+      ],
+    });
+    expect(outcome.issue[0].diagnostics).toBeUndefined();
+    expect(internalServerError('Custom detail').issue[0].details?.text).toBe('Custom detail');
+    expect(internalServerError('Custom detail').issue[0].diagnostics).toBeUndefined();
+  });
+
+  test('Server unavailable', () => {
+    const outcome = serverUnavailable();
+    expect(isOk(outcome)).toBe(false);
+    expect(outcome).toStrictEqual({
+      resourceType: 'OperationOutcome',
+      id: 'server-unavailable',
+      issue: [
+        {
+          severity: 'error',
+          code: 'transient',
+          details: { text: 'Service temporarily unavailable' },
+        },
+      ],
+    });
+    expect(outcome.issue[0].diagnostics).toBeUndefined();
+    expect(serverUnavailable('Database temporarily unavailable').issue[0].details?.text).toBe(
+      'Database temporarily unavailable'
+    );
+    expect(serverUnavailable('Database temporarily unavailable').issue[0].diagnostics).toBeUndefined();
+    expect(getStatus(serverUnavailable('Database temporarily unavailable'))).toStrictEqual(503);
+  });
+
+  test('OperationOutcomeError message defaults to the outcome string', () => {
+    const err = new OperationOutcomeError(notFound);
+    expect(err.name).toBe('OperationOutcomeError');
+    expect(err.message).toBe(operationOutcomeToString(notFound));
+    expect(err.message).toBe('Not found');
+    expect(err.outcome).toBe(notFound);
+    expect(err.cause).toBeUndefined();
+  });
+
+  test('OperationOutcomeError diagnosticMessage overrides the message only', () => {
+    const outcome = serverUnavailable('Database temporarily unavailable');
+    const cause = new Error('terminating connection due to administrator command');
+    const err = new OperationOutcomeError(outcome, { cause, diagnosticMessage: cause.message });
+    expect(err.message).toBe('terminating connection due to administrator command');
+    expect(err.cause).toBe(cause);
+    expect(err.outcome).toBe(outcome);
+    expect(err.outcome).toStrictEqual(serverUnavailable('Database temporarily unavailable'));
+    expect(JSON.stringify(err.outcome)).not.toContain('terminating connection');
+    expect(normalizeErrorString(err)).toBe('terminating connection due to administrator command');
+  });
+
+  test('OperationOutcomeError ignores driver-shaped option objects', () => {
+    // A pg DatabaseError carries message/detail/hint/code/severity, none of which may set Error.message
+    const driverError = Object.assign(new Error('relation "ClientApplication" does not exist'), {
+      code: '42P01',
+      severity: 'ERROR',
+      detail: undefined,
+      hint: undefined,
+    });
+    const err = new OperationOutcomeError(internalServerError(), driverError);
+    expect(err.message).toBe('Internal server error');
+    expect(getStatus(err.outcome)).toStrictEqual(500);
   });
 
   test('Assert OK', () => {

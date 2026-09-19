@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
+import type { User } from '@medplum/fhirtypes';
 import { MockClient } from '@medplum/mock';
 import { MedplumProvider } from '@medplum/react';
 import { MemoryRouter } from 'react-router';
@@ -8,8 +9,13 @@ import { MemberTable } from './MembersTable';
 
 const medplum = new MockClient();
 
+// The id of the User referenced by the MockClient's seeded ProjectMembership row.
+const MEMBER_USER_ID = '123';
+
 async function setup(url: string): Promise<void> {
-  renderAppRoutes(medplum, url);
+  await act(async () => {
+    renderAppRoutes(medplum, url);
+  });
 }
 
 describe('MemberTable (Users page)', () => {
@@ -136,70 +142,78 @@ describe('MemberTable (Users page)', () => {
     // Project allows both authenticator and email MFA.
     const client = await setupMfaClient('totp,email');
     // The member (User/123) is enrolled in TOTP but not email.
-    const batchSpy = vi.spyOn(client, 'executeBatch').mockResolvedValue({
-      resourceType: 'Bundle',
-      type: 'batch-response',
-      entry: [
-        { resource: { resourceType: 'User', id: '123', firstName: 'Alice', lastName: 'Smith', mfaMethod: ['totp'] } },
-      ],
+    await client.updateResource<User>({
+      resourceType: 'User',
+      id: MEMBER_USER_ID,
+      firstName: 'Alice',
+      lastName: 'Smith',
+      mfaMethod: ['totp'],
     });
 
-    renderAppRoutes(client, '/admin/users');
+    await act(async () => {
+      renderAppRoutes(client, '/admin/users');
+    });
     await screen.findAllByTestId('search-control-row');
 
     expect(await screen.findByText('MFA: Authenticator')).toBeInTheDocument();
     expect(screen.getByText('MFA: Email')).toBeInTheDocument();
     expect((await screen.findAllByText('Enrolled')).length).toBeGreaterThan(0);
     expect(screen.getAllByText('Not enrolled').length).toBeGreaterThan(0);
-
-    batchSpy.mockRestore();
   });
 
   test('Omits the Email MFA column when the project does not allow email MFA', async () => {
     const client = await setupMfaClient('totp');
-    const batchSpy = vi
-      .spyOn(client, 'executeBatch')
-      .mockResolvedValue({ resourceType: 'Bundle', type: 'batch-response', entry: [] });
+    await client.updateResource<User>({
+      resourceType: 'User',
+      id: MEMBER_USER_ID,
+      firstName: 'Alice',
+      lastName: 'Smith',
+      mfaMethod: ['totp'],
+    });
 
-    renderAppRoutes(client, '/admin/users');
+    await act(async () => {
+      renderAppRoutes(client, '/admin/users');
+    });
     await screen.findAllByTestId('search-control-row');
 
     expect(await screen.findByText('MFA: Authenticator')).toBeInTheDocument();
     expect(screen.queryByText('MFA: Email')).not.toBeInTheDocument();
-
-    batchSpy.mockRestore();
   });
 
   test('Does not show MFA enrollment columns when showMfaEnrollment is not set', async () => {
-    const batchSpy = vi.spyOn(medplum, 'executeBatch');
-    render(
-      <MedplumProvider medplum={medplum}>
-        <MemoryRouter>
-          <MemberTable profileTypeOptions={[{ label: 'Practitioner', value: 'Practitioner' }]} fields={['user']} />
-        </MemoryRouter>
-      </MedplumProvider>
-    );
+    const searchSpy = vi.spyOn(medplum, 'searchResources');
+    await act(async () => {
+      render(
+        <MedplumProvider medplum={medplum}>
+          <MemoryRouter>
+            <MemberTable profileTypeOptions={[{ label: 'Practitioner', value: 'Practitioner' }]} fields={['user']} />
+          </MemoryRouter>
+        </MedplumProvider>
+      );
+    });
 
     await screen.findAllByTestId('search-control-row');
     expect(screen.queryByText('MFA: Authenticator')).not.toBeInTheDocument();
     expect(screen.queryByText('MFA: Email')).not.toBeInTheDocument();
     // No member Users are fetched when the columns are disabled.
-    expect(batchSpy).not.toHaveBeenCalled();
-    batchSpy.mockRestore();
+    expect(searchSpy).not.toHaveBeenCalled();
+    searchSpy.mockRestore();
   });
 
   test('Shows custom toolbar content even without segmented control or toolbarLeft', async () => {
-    render(
-      <MedplumProvider medplum={medplum}>
-        <MemoryRouter>
-          <MemberTable
-            profileTypeOptions={[{ label: 'Practitioner', value: 'Practitioner' }]}
-            fields={['user']}
-            toolbarRight={<span>Right note</span>}
-          />
-        </MemoryRouter>
-      </MedplumProvider>
-    );
+    await act(async () => {
+      render(
+        <MedplumProvider medplum={medplum}>
+          <MemoryRouter>
+            <MemberTable
+              profileTypeOptions={[{ label: 'Practitioner', value: 'Practitioner' }]}
+              fields={['user']}
+              toolbarRight={<span>Right note</span>}
+            />
+          </MemoryRouter>
+        </MedplumProvider>
+      );
+    });
 
     expect(await screen.findByText('Right note')).toBeInTheDocument();
   });

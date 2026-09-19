@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { MEDPLUM_VERSION } from '@medplum/core';
+import { MEDPLUM_VERSION, normalizeErrorString } from '@medplum/core';
 import type { Request, Response } from 'express';
 import os from 'node:os';
 import type { PoolClient } from 'pg';
 import { DatabaseMode, getDatabasePool } from './database';
+import { getLogger } from './logger';
 import type { RecordMetricOptions } from './otel/otel';
 import { setGauge } from './otel/otel';
 import type { RedisWithoutDuplicate } from './redis';
@@ -18,9 +19,15 @@ let readerConn: PoolClient | undefined;
 let writerConn: PoolClient | undefined;
 
 export async function healthcheckHandler(_req: Request, res: Response): Promise<void> {
-  writerConn ??= await getReservedDatabaseConnection(DatabaseMode.WRITER);
+  let postgresWriterOk: boolean;
   let startTime = Date.now();
-  const postgresWriterOk = await testPostgres(writerConn);
+  try {
+    writerConn ??= await getReservedDatabaseConnection(DatabaseMode.WRITER);
+    postgresWriterOk = await testPostgres(writerConn);
+  } catch (err) {
+    discardReservedDatabaseConnection(DatabaseMode.WRITER, err);
+    postgresWriterOk = false;
+  }
   const writerRoundtripMs = Date.now() - startTime;
   setGauge('medplum.db.healthcheckRTT', writerRoundtripMs / 1000, {
     ...METRIC_IN_SECS_OPTIONS,
@@ -33,7 +40,8 @@ export async function healthcheckHandler(_req: Request, res: Response): Promise<
       readerConn ??= await getReservedDatabaseConnection(DatabaseMode.READER);
       startTime = Date.now();
       postgresReaderOk = await testPostgres(readerConn);
-    } catch {
+    } catch (err) {
+      discardReservedDatabaseConnection(DatabaseMode.READER, err);
       postgresReaderOk = false;
     }
     const readerRoundtripMs = Date.now() - startTime;
@@ -76,6 +84,32 @@ export async function healthcheckHandler(_req: Request, res: Response): Promise<
 
 async function getReservedDatabaseConnection(mode: DatabaseMode): Promise<PoolClient> {
   return getDatabasePool(mode).connect();
+}
+
+/**
+ * Releases the reserved connection for the given mode and forgets it, so the next health check
+ * checks out a fresh client from the pool.
+ * @param mode - The database mode whose reserved connection is discarded.
+ * @param err - The error that made the reserved connection unusable.
+ */
+function discardReservedDatabaseConnection(mode: DatabaseMode, err: unknown): void {
+  const conn = mode === DatabaseMode.WRITER ? writerConn : readerConn;
+  if (mode === DatabaseMode.WRITER) {
+    writerConn = undefined;
+  } else {
+    readerConn = undefined;
+  }
+
+  getLogger().warn('Health check database connection failed', { mode, err: normalizeErrorString(err) });
+
+  try {
+    conn?.release(true);
+  } catch (releaseErr) {
+    getLogger().warn('Error releasing reserved database connection', {
+      mode,
+      err: normalizeErrorString(releaseErr),
+    });
+  }
 }
 
 export function cleanupReservedDatabaseConnections(): void {

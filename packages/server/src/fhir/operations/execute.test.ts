@@ -21,6 +21,7 @@ import type {
 } from '@medplum/fhirtypes';
 import express from 'express';
 import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 import request from 'supertest';
 import { inviteUser } from '../../admin/invite';
 import { initApp, shutdownApp } from '../../app';
@@ -146,6 +147,28 @@ const botDefinitions: { name: BotName; system: boolean; code: [string, string]; 
   { name: 'streamingBot', system: false, code: botCodes[3], streaming: true },
   { name: 'streamingErrorBot', system: false, code: botCodes[4], streaming: true },
 ];
+
+/**
+ * Asserts that the compiled CommonJS bundle of `@medplum/core` is resolvable through Node's own resolver --
+ * the resolver a VM context bot uses when its code calls `require('@medplum/core')`.
+ * @throws An `Error` naming the missing build artifact, the command that produces it and the underlying
+ * resolution failure, when the bundle cannot be resolved.
+ */
+function assertMedplumCoreCjsBundleAvailable(): void {
+  try {
+    createRequire(import.meta.url).resolve('@medplum/core');
+  } catch (err) {
+    throw new Error(
+      'The compiled CommonJS bundle of @medplum/core is missing. VM context bot code in this test calls ' +
+        "require('@medplum/core'), which Node's own resolver loads from packages/core/dist/cjs/index.cjs; the " +
+        "vitest source aliases that serve the rest of this file do not reach inside the bot's sandbox, so that " +
+        'build artifact must exist on disk. Build it first, from the repository root: ' +
+        'npx turbo run build --filter=@medplum/core. Running the suite through "npm t" or "npx turbo run test" ' +
+        'builds it beforehand, so those entry points never see this failure. Resolution error: ' +
+        (err instanceof Error ? err.message : String(err))
+    );
+  }
+}
 
 describe('Execute', () => {
   let app: express.Express;
@@ -397,6 +420,8 @@ describe('Execute', () => {
   });
 
   test('VM context bot success', async () => {
+    assertMedplumCoreCjsBundleAvailable();
+
     // Create a bot with empty code
     const res1 = await request(app)
       .post(`/fhir/R4/Bot`)

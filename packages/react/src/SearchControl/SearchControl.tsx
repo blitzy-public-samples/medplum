@@ -32,7 +32,7 @@ import {
   IconTableExport,
   IconTrash,
 } from '@tabler/icons-react';
-import type { ChangeEvent, JSX, MouseEvent, ReactNode } from 'react';
+import type { ChangeEvent, JSX, KeyboardEvent, MouseEvent, ReactNode } from 'react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Container } from '../Container/Container';
 import { OperationOutcomeAlert } from '../OperationOutcomeAlert/OperationOutcomeAlert';
@@ -45,6 +45,7 @@ import { SearchPopupMenu } from '../SearchPopupMenu/SearchPopupMenu';
 import { isAuxClick, isCheckboxCell, killEvent } from '../utils/dom';
 import { getPaginationControlProps } from '../utils/pagination';
 import classes from './SearchControl.module.css';
+import type { SearchControlField } from './SearchControlField';
 import { getFieldDefinitions } from './SearchControlField';
 import { addFilter, buildFieldNameString, getOpString, renderValue, setPage } from './SearchUtils';
 
@@ -98,6 +99,8 @@ export interface SearchControlProps {
   readonly checkboxesEnabled?: boolean;
   /** Additional computed columns rendered after the search-result columns. */
   readonly additionalColumns?: readonly SearchControlAdditionalColumn[];
+  /** The accessible name of the results table. Defaults to `"<resourceType> search results"`. */
+  readonly tableAriaLabel?: string;
   readonly hideToolbar?: boolean;
   readonly hideFilters?: boolean;
   readonly onLoad?: (e: SearchLoadEvent) => void;
@@ -114,6 +117,8 @@ export interface SearchControlProps {
 
 interface SearchControlState {
   readonly searchResponse?: Bundle;
+  /** The search request that produced {@link SearchControlState.searchResponse}. */
+  readonly loadedSearch?: SearchRequest;
   readonly selected: { [id: string]: boolean };
   readonly fieldEditorVisible: boolean;
   readonly filterEditorVisible: boolean;
@@ -155,10 +160,14 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
     stateRef.current = state;
   });
 
+  const searchGenerationRef = useRef(0);
+
   const total = memoizedSearch.total ?? 'accurate';
 
   const loadResults = useCallback(
     (options?: RequestInit) => {
+      searchGenerationRef.current++;
+      const generation = searchGenerationRef.current;
       setOutcome(undefined);
       medplum
         .requestSchema(memoizedSearch.resourceType)
@@ -170,13 +179,19 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
           )
         )
         .then((response) => {
-          setState({ ...stateRef.current, searchResponse: response });
+          if (generation !== searchGenerationRef.current) {
+            return;
+          }
+          setState({ ...stateRef.current, searchResponse: response, loadedSearch: memoizedSearch });
           if (onLoad) {
             onLoad(new SearchLoadEvent(response));
           }
         })
         .catch((reason) => {
-          setState({ ...stateRef.current, searchResponse: undefined });
+          if (generation !== searchGenerationRef.current) {
+            return;
+          }
+          setState({ ...stateRef.current, searchResponse: undefined, loadedSearch: undefined });
           setOutcome(normalizeOperationOutcome(reason));
         });
     },
@@ -191,6 +206,35 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
   useEffect(() => {
     loadResults();
   }, [loadResults]);
+
+  const rowRegionRef = useRef<HTMLTableSectionElement | null>(null);
+  const fullPageRowRegionHeightRef = useRef(0);
+  const [reservedRowRegionHeight, setReservedRowRegionHeight] = useState(0);
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    const rowRegion = rowRegionRef.current;
+    const searchResponse = state.searchResponse;
+    let reserved = 0;
+    if (rowRegion && searchResponse && rowRegion.rows.length > 0 && getTotalPages(memoizedSearch, searchResponse) > 1) {
+      const pageSize = memoizedSearch.count ?? DEFAULT_SEARCH_COUNT;
+      const height = rowRegion.getBoundingClientRect().height;
+      const loadingNewSearch = !!state.loadedSearch && !deepEquals(state.loadedSearch, memoizedSearch);
+      const dataRowCount = loadingNewSearch ? 0 : rowRegion.rows.length;
+      if (height > 0 && dataRowCount === pageSize) {
+        fullPageRowRegionHeightRef.current = height;
+      }
+      reserved = getReservedRowRegionHeight({
+        height,
+        dataRowCount,
+        fullPageHeight: fullPageRowRegionHeightRef.current,
+        pageSize,
+      });
+    }
+    if (Math.abs(reserved - reservedRowRegionHeight) > 0.5) {
+      setReservedRowRegionHeight(reserved);
+    }
+  });
 
   function handleSingleCheckboxClick(e: ChangeEvent, id: string): void {
     e.stopPropagation();
@@ -278,6 +322,45 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
     return !!(props.onExport ?? props.onExportCsv ?? props.onExportTransactionBundle);
   }
 
+  /**
+   * Moves focus between the enabled pagination controls of the pagination navigation landmark.
+   * Handles "ArrowRight" (next control), "ArrowLeft" (previous control), "Home" (first control) and "End" (last
+   * control), and calls preventDefault only when focus moves.
+   * @param e - The keyboard event captured by the pagination navigation landmark.
+   */
+  function handlePaginationKeyDown(e: KeyboardEvent<HTMLElement>): void {
+    const buttons = Array.from(e.currentTarget.querySelectorAll('button')).filter((button) => !button.disabled);
+    const currentIndex = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (currentIndex < 0) {
+      return;
+    }
+
+    let nextIndex: number;
+    switch (e.key) {
+      case 'ArrowRight':
+        nextIndex = currentIndex + 1;
+        break;
+      case 'ArrowLeft':
+        nextIndex = currentIndex - 1;
+        break;
+      case 'Home':
+        nextIndex = 0;
+        break;
+      case 'End':
+        nextIndex = buttons.length - 1;
+        break;
+      default:
+        return;
+    }
+
+    if (nextIndex === currentIndex || nextIndex < 0 || nextIndex >= buttons.length) {
+      return;
+    }
+
+    e.preventDefault();
+    buttons[nextIndex].focus();
+  }
+
   if (outcome) {
     return <OperationOutcomeAlert outcome={outcome} />;
   }
@@ -296,6 +379,8 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
   const lastResult = state.searchResponse;
   const entries = lastResult?.entry;
   const resources = entries?.map((e) => e.resource);
+  const loadingNewSearch = !!lastResult && !!state.loadedSearch && !deepEquals(state.loadedSearch, memoizedSearch);
+  const columnCount = (checkboxColumn ? 1 : 0) + fields.length + (props.additionalColumns?.length ?? 0);
 
   const buttonVariant = 'subtle';
   const buttonColor = 'gray';
@@ -389,11 +474,15 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
           </Group>
         </Group>
       )}
-      <Table className={classes.table}>
+      <Table
+        className={classes.table}
+        aria-label={props.tableAriaLabel ?? `${resourceType} search results`}
+        aria-busy={loadingNewSearch}
+      >
         <Table.Thead>
           <Table.Tr>
             {checkboxColumn && (
-              <Table.Th>
+              <Table.Th scope="col">
                 <input
                   type="checkbox"
                   value="checked"
@@ -405,7 +494,7 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
               </Table.Th>
             )}
             {fields.map((field) => (
-              <Table.Th key={field.name}>
+              <Table.Th key={field.name} scope="col" aria-sort={getColumnAriaSort(memoizedSearch, field)}>
                 <Menu shadow="md" width={240} position="bottom-end">
                   <Menu.Target>
                     <UnstyledButton className={classes.control} p={2}>
@@ -437,7 +526,7 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
               </Table.Th>
             ))}
             {props.additionalColumns?.map((col) => (
-              <Table.Th key={col.name}>
+              <Table.Th key={col.name} scope="col">
                 <Text fw={500} p={2}>
                   {col.name}
                 </Text>
@@ -446,9 +535,9 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
           </Table.Tr>
           {!props.hideFilters && (
             <Table.Tr>
-              {checkboxColumn && <Table.Th />}
+              {checkboxColumn && <Table.Th scope="col" />}
               {fields.map((field) => (
-                <Table.Th key={field.name}>
+                <Table.Th key={field.name} scope="col">
                   {field.searchParams && (
                     <FilterDescription
                       resourceType={resourceType}
@@ -459,46 +548,64 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
                 </Table.Th>
               ))}
               {props.additionalColumns?.map((col) => (
-                <Table.Th key={col.name} />
+                <Table.Th key={col.name} scope="col" />
               ))}
             </Table.Tr>
           )}
         </Table.Thead>
-        <Table.Tbody>
-          {resources?.map(
-            (resource) =>
-              resource && (
-                <Table.Tr
-                  key={resource.id}
-                  className={classes.tr}
-                  data-testid="search-control-row"
-                  onClick={(e) => handleRowClick(e, resource)}
-                  onAuxClick={(e) => handleRowClick(e, resource)}
-                >
-                  {checkboxColumn && (
-                    <Table.Td>
-                      <input
-                        type="checkbox"
-                        value="checked"
-                        data-testid="row-checkbox"
-                        aria-label={`Checkbox for ${resource.id}`}
-                        checked={!!state.selected[resource.id as string]}
-                        onChange={(e) => handleSingleCheckboxClick(e, resource.id as string)}
-                      />
-                    </Table.Td>
-                  )}
-                  {fields.map((field) => (
-                    <Table.Td key={field.name}>{renderValue(resource, field)}</Table.Td>
-                  ))}
-                  {props.additionalColumns?.map((col) => (
-                    <Table.Td key={col.name}>{col.renderCell(resource)}</Table.Td>
-                  ))}
-                </Table.Tr>
-              )
+        <Table.Tbody ref={rowRegionRef}>
+          {loadingNewSearch ? (
+            <Table.Tr data-testid="search-control-loading-row">
+              <Table.Td colSpan={columnCount}>
+                <Center>
+                  <Loader size="sm" />
+                </Center>
+              </Table.Td>
+            </Table.Tr>
+          ) : (
+            resources?.map(
+              (resource) =>
+                resource && (
+                  <Table.Tr
+                    key={resource.id}
+                    className={classes.tr}
+                    data-testid="search-control-row"
+                    onClick={(e) => handleRowClick(e, resource)}
+                    onAuxClick={(e) => handleRowClick(e, resource)}
+                  >
+                    {checkboxColumn && (
+                      <Table.Td>
+                        <input
+                          type="checkbox"
+                          value="checked"
+                          data-testid="row-checkbox"
+                          aria-label={`Checkbox for ${resource.id}`}
+                          checked={!!state.selected[resource.id as string]}
+                          onChange={(e) => handleSingleCheckboxClick(e, resource.id as string)}
+                        />
+                      </Table.Td>
+                    )}
+                    {fields.map((field) => (
+                      <Table.Td key={field.name}>{renderValue(resource, field)}</Table.Td>
+                    ))}
+                    {props.additionalColumns?.map((col) => (
+                      <Table.Td key={col.name}>{col.renderCell(resource)}</Table.Td>
+                    ))}
+                  </Table.Tr>
+                )
+            )
           )}
         </Table.Tbody>
       </Table>
-      {!resources?.length && (
+      {reservedRowRegionHeight > 0 && (
+        <div
+          aria-hidden="true"
+          data-testid="search-control-row-region-spacer"
+          className={classes.rowRegionSpacer}
+          style={{ height: reservedRowRegionHeight }}
+        />
+      )}
+      {!loadingNewSearch && !resources?.length && (
         <Container>
           <Center style={{ height: 150 }}>
             <Text size="xl" c="dimmed">
@@ -509,12 +616,14 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
       )}
       {lastResult && (
         <Center m="md" p="md">
-          <Pagination
-            value={getPage(memoizedSearch)}
-            total={getTotalPages(memoizedSearch, lastResult)}
-            onChange={(newPage) => emitSearchChange(setPage(memoizedSearch, newPage))}
-            getControlProps={getPaginationControlProps}
-          />
+          <nav aria-label={`${resourceType} search results pagination`} onKeyDown={handlePaginationKeyDown}>
+            <Pagination
+              value={getPage(memoizedSearch)}
+              total={getTotalPages(memoizedSearch, lastResult)}
+              onChange={(newPage) => emitSearchChange(setPage(memoizedSearch, newPage))}
+              getControlProps={getPaginationControlProps}
+            />
+          </nav>
         </Center>
       )}
       <SearchFieldEditor
@@ -614,6 +723,60 @@ function FilterDescription(props: FilterDescriptionProps): JSX.Element {
       ))}
     </>
   );
+}
+
+/**
+ * Returns the `aria-sort` value of a column header cell.
+ * @param search - The search request that carries the sort rules.
+ * @param field - The column field definition.
+ * @returns "ascending" or "descending" when a sort rule targets one of the column's search parameters, and undefined
+ * for every other column, which leaves the attribute absent.
+ */
+function getColumnAriaSort(search: SearchRequest, field: SearchControlField): 'ascending' | 'descending' | undefined {
+  const searchParams = field.searchParams;
+  if (!searchParams || searchParams.length === 0) {
+    return undefined;
+  }
+  const sortRule = search.sortRules?.find((rule) => searchParams.some((searchParam) => searchParam.code === rule.code));
+  if (!sortRule) {
+    return undefined;
+  }
+  return sortRule.descending ? 'descending' : 'ascending';
+}
+
+/** A post-layout measurement of the rendered row region, i.e. the table body that holds the result rows. */
+interface RowRegionMeasurement {
+  /** The measured height of the row region, in pixels. */
+  readonly height: number;
+  /** The number of result rows rendered in the row region, and 0 while a new search is in flight. */
+  readonly dataRowCount: number;
+  /** The most recently measured height of a full page of results, in pixels, and 0 when none has been measured. */
+  readonly fullPageHeight: number;
+  /** The number of results per page. */
+  readonly pageSize: number;
+}
+
+/**
+ * Returns the height to hold below the rendered result rows so that the row region spans a full page of results.
+ * @param measurement - The post-layout measurement of the row region.
+ * @returns The reservation height in pixels, maintaining `height + result === fullPageHeight` whenever a full-page
+ * height is known or can be derived from the rendered rows. Returns 0 when the row region has no measurable height,
+ * when it already spans a full page, and when no full-page height is known and none can be derived because no result
+ * row is rendered.
+ */
+function getReservedRowRegionHeight(measurement: RowRegionMeasurement): number {
+  const { height, dataRowCount, fullPageHeight, pageSize } = measurement;
+  if (height <= 0 || pageSize <= 0) {
+    return 0;
+  }
+  let referenceHeight = fullPageHeight;
+  if (referenceHeight <= 0) {
+    if (dataRowCount <= 0) {
+      return 0;
+    }
+    referenceHeight = (height / dataRowCount) * pageSize;
+  }
+  return Math.max(0, referenceHeight - height);
 }
 
 function getPage(search: SearchRequest): number {

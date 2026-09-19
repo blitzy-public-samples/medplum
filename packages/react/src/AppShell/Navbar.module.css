@@ -138,6 +138,10 @@
   }
 }
 
+.userLinkProject {
+  color: light-dark(var(--mantine-color-gray-7), var(--mantine-color-dark-1));
+}
+
 .iconWrapper {
   position: relative;
   display: flex;
@@ -212,7 +216,6 @@
 .addBookmarkLink {
   margin-top: 40px;
   color: light-dark(var(--mantine-color-gray-7), var(--mantine-color-dark-0));
-
 
   & svg:global(.tabler-icon) {
     color: light-dark(var(--mantine-color-gray-7), var(--mantine-color-dark-0));

@@ -6,8 +6,11 @@ import {
   append,
   badRequest,
   conflict,
+  internalServerError,
+  normalizeErrorString,
   normalizeOperationOutcome,
   serverTimeout,
+  serverUnavailable,
 } from '@medplum/core';
 import type { Period } from '@medplum/fhirtypes';
 import { env } from 'node:process';
@@ -682,7 +685,97 @@ export const PostgresError = {
   QueryCanceled: '57014',
   InFailedSqlTransaction: '25P02',
   DatetimeFieldOverflow: '22008',
+  ConnectionException: '08000',
+  SqlClientUnableToEstablishConnection: '08001',
+  ConnectionDoesNotExist: '08003',
+  ServerRejectedConnection: '08004',
+  ConnectionFailure: '08006',
+  TransactionResolutionUnknown: '08007',
+  ProtocolViolation: '08P01',
+  AdminShutdown: '57P01',
+  CrashShutdown: '57P02',
+  CannotConnectNow: '57P03',
+  TooManyConnections: '53300',
 } as const;
+
+/**
+ * Postgres error severities that mean the backend has terminated the session.
+ * @see https://www.postgresql.org/docs/16/protocol-error-fields.html
+ */
+const FATAL_DATABASE_ERROR_SEVERITIES: ReadonlySet<string> = new Set(['FATAL', 'PANIC']);
+
+/**
+ * SQLSTATE codes that indicate a lost, refused or unavailable database connection.
+ * @see https://www.postgresql.org/docs/16/errcodes-appendix.html
+ */
+const TRANSIENT_DATABASE_ERROR_CODES: ReadonlySet<string> = new Set([
+  PostgresError.ConnectionException,
+  PostgresError.SqlClientUnableToEstablishConnection,
+  PostgresError.ConnectionDoesNotExist,
+  PostgresError.ServerRejectedConnection,
+  PostgresError.ConnectionFailure,
+  PostgresError.TransactionResolutionUnknown,
+  PostgresError.ProtocolViolation,
+  PostgresError.AdminShutdown,
+  PostgresError.CrashShutdown,
+  PostgresError.CannotConnectNow,
+  PostgresError.TooManyConnections,
+]);
+
+/**
+ * Node socket and DNS error codes raised while reaching the database host.
+ * @see https://nodejs.org/api/errors.html#common-system-errors
+ */
+const TRANSIENT_SOCKET_ERROR_CODES: ReadonlySet<string> = new Set([
+  'ECONNRESET',
+  'EPIPE',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EAI_AGAIN',
+]);
+
+/**
+ * Messages raised by `pg` and `pg-pool` for connection loss, which carry no SQLSTATE code.
+ * @see https://github.com/brianc/node-postgres/blob/master/packages/pg-pool/index.js
+ */
+const TRANSIENT_DATABASE_ERROR_MESSAGES: readonly string[] = [
+  'Connection terminated unexpectedly',
+  'Connection terminated',
+  'Client has encountered a connection error and is not queryable',
+  'timeout exceeded when trying to connect',
+];
+
+/**
+ * Checks whether an error represents a lost or unavailable database connection rather than a
+ * defect in the statement that was executed.
+ *
+ * An error qualifies when its `severity` is `FATAL` or `PANIC`, when its `code` is a connection
+ * SQLSTATE or a socket-level failure, or when its `message` is one of the `pg`/`pg-pool`
+ * connection-loss messages, which carry no code.
+ * @param err - The error to classify. Any value is accepted, including `undefined`, `null`,
+ * primitives and objects without the inspected fields.
+ * @returns True if the error indicates the database was unreachable or the session was terminated.
+ */
+export function isDatabaseConnectionError(err: any): boolean {
+  const severity = err?.severity;
+  if (typeof severity === 'string' && FATAL_DATABASE_ERROR_SEVERITIES.has(severity.toUpperCase())) {
+    return true;
+  }
+
+  const code = err?.code;
+  if (
+    typeof code === 'string' &&
+    (TRANSIENT_DATABASE_ERROR_CODES.has(code) || TRANSIENT_SOCKET_ERROR_CODES.has(code))
+  ) {
+    return true;
+  }
+
+  const message = err?.message;
+  return typeof message === 'string' && TRANSIENT_DATABASE_ERROR_MESSAGES.some((text) => message.includes(text));
+}
 
 /**
  * Checks whether an error represents a serialization conflict that can safely be retried.
@@ -731,7 +824,29 @@ export function normalizeDatabaseError(err: any): OperationOutcomeError {
         // Date/time value out of range (e.g. Feb 29 on a non-leap year) -> 400 Bad Request
         return new OperationOutcomeError(badRequest(err.message), err);
     }
+  }
+
+  if (isDatabaseConnectionError(err)) {
+    // Connection lost, refused or terminated -> 503 Service Unavailable
+    getLogger().warn('Database connection unavailable', {
+      error: err.message,
+      stack: err.stack,
+      code: err.code,
+      severity: err.severity,
+    });
+    return new OperationOutcomeError(serverUnavailable('Database temporarily unavailable'), {
+      cause: err,
+      diagnosticMessage: normalizeErrorString(err),
+    });
+  }
+
+  if (err.code) {
+    // Any other driver-reported failure (e.g. 42P01 undefined_table) -> 500 Internal Server Error
     getLogger().error('Database error', { error: err.message, stack: err.stack, code: err.code });
+    return new OperationOutcomeError(internalServerError(), {
+      cause: err,
+      diagnosticMessage: normalizeErrorString(err),
+    });
   }
 
   return new OperationOutcomeError(normalizeOperationOutcome(err), err);

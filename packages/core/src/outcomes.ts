@@ -22,6 +22,7 @@ const TOO_MANY_REQUESTS_ID = 'too-many-requests';
 export const RATE_LIMIT_RESET_EXTENSION_URL = 'https://medplum.com/fhir/StructureDefinition/rate-limit-reset';
 const ACCEPTED_ID = 'accepted';
 const SERVER_TIMEOUT_ID = 'server-timeout';
+const SERVER_UNAVAILABLE_ID = 'server-unavailable';
 const BUSINESS_RULE = 'business-rule';
 
 export const allOk: OperationOutcome = {
@@ -347,6 +348,47 @@ export function serverError(err: Error): OperationOutcome {
   };
 }
 
+/**
+ * Returns an OperationOutcome for an internal server error, mapped to HTTP 500 by `getStatus`.
+ * @param details - Optional caller-facing message; defaults to "Internal server error".
+ * @returns An OperationOutcome with a single `exception` issue and no diagnostics.
+ */
+export function internalServerError(details?: string): OperationOutcome {
+  return {
+    resourceType: 'OperationOutcome',
+    issue: [
+      {
+        severity: 'error',
+        code: 'exception',
+        details: {
+          text: details ?? 'Internal server error',
+        },
+      },
+    ],
+  };
+}
+
+/**
+ * Returns an OperationOutcome for a temporarily unavailable service, mapped to HTTP 503 by `getStatus`.
+ * @param details - Optional caller-facing message; defaults to "Service temporarily unavailable".
+ * @returns An OperationOutcome with a single `transient` issue and no diagnostics.
+ */
+export function serverUnavailable(details?: string): OperationOutcome {
+  return {
+    resourceType: 'OperationOutcome',
+    id: SERVER_UNAVAILABLE_ID,
+    issue: [
+      {
+        severity: 'error',
+        code: 'transient',
+        details: {
+          text: details ?? 'Service temporarily unavailable',
+        },
+      },
+    ],
+  };
+}
+
 export function serverTimeout(msg?: string): OperationOutcome {
   return {
     resourceType: 'OperationOutcome',
@@ -503,6 +545,8 @@ export function getStatus(outcome: OperationOutcome): number {
       return 429;
     case SERVER_TIMEOUT_ID:
       return 504;
+    case SERVER_UNAVAILABLE_ID:
+      return 503;
     default:
       return outcome.issue?.[0]?.code === 'exception' ? 500 : 400;
   }
@@ -519,11 +563,31 @@ export function assertOk<T>(outcome: OperationOutcome, resource: T | undefined):
   }
 }
 
+/**
+ * Options accepted by the `OperationOutcomeError` constructor.
+ *
+ * Extends the standard `ErrorOptions` (`cause`) with `diagnosticMessage`, which sets
+ * `Error.message` independently of the outcome carried on the wire.
+ * @example
+ * ```typescript
+ * throw new OperationOutcomeError(serverUnavailable(), { cause: err, diagnosticMessage: err.message });
+ * ```
+ */
+export interface OperationOutcomeErrorOptions extends ErrorOptions {
+  readonly diagnosticMessage?: string;
+}
+
 export class OperationOutcomeError extends Error {
   readonly outcome: OperationOutcome;
 
-  constructor(outcome: OperationOutcome, options?: ErrorOptions) {
-    super(operationOutcomeToString(outcome), options);
+  /**
+   * Creates an Error that carries an OperationOutcome.
+   * @param outcome - The OperationOutcome describing the failure.
+   * @param options - Optional `cause` and `diagnosticMessage`; when `diagnosticMessage` is
+   *   omitted, `Error.message` is the string representation of the outcome.
+   */
+  constructor(outcome: OperationOutcome, options?: OperationOutcomeErrorOptions) {
+    super(options?.diagnosticMessage ?? operationOutcomeToString(outcome), options);
     this.name = 'OperationOutcomeError';
     this.outcome = outcome;
   }

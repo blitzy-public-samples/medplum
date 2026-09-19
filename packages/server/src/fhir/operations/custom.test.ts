@@ -4,10 +4,33 @@ import type { WithId } from '@medplum/core';
 import { badRequest, ContentType, createReference } from '@medplum/core';
 import type { Bot, Patient } from '@medplum/fhirtypes';
 import express from 'express';
+import { createRequire } from 'node:module';
 import request from 'supertest';
 import { initApp, shutdownApp } from '../../app';
 import { loadTestConfig } from '../../config/loader';
 import { initTestAuth } from '../../test.setup';
+
+/**
+ * Asserts that the compiled CommonJS bundle of `@medplum/core` is resolvable through Node's own resolver --
+ * the resolver a VM context bot uses when its code calls `require('@medplum/core')`.
+ * @throws An `Error` naming the missing build artifact, the command that produces it and the underlying
+ * resolution failure, when the bundle cannot be resolved.
+ */
+function assertMedplumCoreCjsBundleAvailable(): void {
+  try {
+    createRequire(import.meta.url).resolve('@medplum/core');
+  } catch (err) {
+    throw new Error(
+      'The compiled CommonJS bundle of @medplum/core is missing. VM context bot code in this test calls ' +
+        "require('@medplum/core'), which Node's own resolver loads from packages/core/dist/cjs/index.cjs; the " +
+        "vitest source aliases that serve the rest of this file do not reach inside the bot's sandbox, so that " +
+        'build artifact must exist on disk. Build it first, from the repository root: ' +
+        'npx turbo run build --filter=@medplum/core. Running the suite through "npm t" or "npx turbo run test" ' +
+        'builds it beforehand, so those entry points never see this failure. Resolution error: ' +
+        (err instanceof Error ? err.message : String(err))
+    );
+  }
+}
 
 describe('Custom operation', () => {
   const app = express();
@@ -346,6 +369,8 @@ describe('Custom operation', () => {
   });
 
   test('Error value returned all the way to the client', async () => {
+    assertMedplumCoreCjsBundleAvailable();
+
     const res1 = await request(app)
       .post('/fhir/R4/Bot')
       .set('Content-Type', ContentType.FHIR_JSON)
@@ -421,6 +446,8 @@ describe('Custom operation', () => {
   });
 
   test('Helpful error if return type does not match', async () => {
+    assertMedplumCoreCjsBundleAvailable();
+
     const res1 = await request(app)
       .post('/fhir/R4/Bot')
       .set('Content-Type', ContentType.FHIR_JSON)

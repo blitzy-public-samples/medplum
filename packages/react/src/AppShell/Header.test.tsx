@@ -6,18 +6,19 @@ import { MockClient, TestProject } from '@medplum/mock';
 import { MedplumProvider } from '@medplum/react-hooks';
 import { Logo } from '../Logo/Logo';
 import { act, fireEvent, render, screen } from '../test-utils/render';
+import type { HeaderProps } from './Header';
 import { Header } from './Header';
 
 const medplum = new MockClient();
 const navigateMock = vi.fn();
 const closeMock = vi.fn();
 
-async function setup(client?: MockClient): Promise<void> {
+async function setup(client?: MockClient, headerProps?: Partial<HeaderProps>): Promise<void> {
   await act(async () => {
     render(
       <MedplumProvider medplum={client ?? medplum} navigate={navigateMock}>
         <MantineAppShell>
-          <Header logo={<Logo size={24} />} version="test.version" navbarToggle={closeMock} />
+          <Header logo={<Logo size={24} />} version="test.version" navbarToggle={closeMock} {...headerProps} />
         </MantineAppShell>
       </MedplumProvider>
     );
@@ -206,6 +207,36 @@ describe('Header', () => {
     expect(navigateMock).toHaveBeenCalledWith('/signin');
   });
 
+  test('User menu button name contains its visible content', async () => {
+    await setup();
+
+    const userMenuButton = screen.getByRole('button', { name: /Alice Smith.*User menu/s });
+    expect(userMenuButton).not.toHaveAttribute('aria-label');
+    expect(userMenuButton).toHaveTextContent('Alice Smith');
+    expect(userMenuButton).toHaveTextContent('User menu');
+    expect(screen.queryByRole('button', { name: 'User menu' })).not.toBeInTheDocument();
+  });
+
+  test('Banner, search landmark and skip link', async () => {
+    await setup();
+
+    expect(screen.getByRole('banner')).toHaveAttribute('aria-label', 'Application header');
+
+    const searchLandmark = screen.getByRole('search', { name: 'Search patients and orders' });
+    expect(searchLandmark).toContainElement(screen.getByPlaceholderText('Search'));
+
+    const skipLink = screen.getByRole('link', { name: 'Skip to main content' });
+    expect(skipLink).toHaveAttribute('href', '#medplum-main-content');
+  });
+
+  test('No search landmark when the header search is disabled', async () => {
+    await setup(undefined, { headerSearchDisabled: true });
+
+    expect(screen.queryByRole('search')).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('Search')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Skip to main content' })).toBeInTheDocument();
+  });
+
   test('Dark mode', async () => {
     await setup();
     await openMenu();
@@ -229,7 +260,7 @@ function isMenuOpen(): boolean {
 async function openMenu(): Promise<void> {
   if (!isMenuOpen()) {
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'User menu' }));
+      fireEvent.click(screen.getByRole('button', { name: /User menu/ }));
     });
 
     await screen.findByText('Sign out');

@@ -19,6 +19,7 @@ import { authenticateRequest } from '../oauth/middleware';
 import { getUserByEmailInProject } from '../oauth/utils';
 import { createBotHandler, createBotValidator } from './bot';
 import { createClientHandler, createClientValidator } from './client';
+import { clientSecurityHandler } from './clientsecurity';
 import { inviteHandler, inviteValidator } from './invite';
 import { verifyProjectAdmin } from './utils';
 
@@ -66,6 +67,7 @@ projectAdminRouter.post(
 projectAdminRouter.post('/:projectId/bot', createBotValidator, createBotHandler);
 projectAdminRouter.post('/:projectId/client', createClientValidator, createClientHandler);
 projectAdminRouter.post('/:projectId/invite', inviteValidator, inviteHandler);
+projectAdminRouter.get('/:projectId/oauth-security', clientSecurityHandler);
 
 /**
  * Handles requests to "/admin/projects/{projectId}"

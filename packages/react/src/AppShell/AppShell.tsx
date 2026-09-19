@@ -20,6 +20,11 @@ const CLOSED_WIDTH = 59;
 const HEADER_HEIGHT = 60;
 const ANNOUNCEMENT_HEIGHT = 36;
 
+/**
+ * The DOM id of the main content region. Must match the skip link target in `Header`.
+ */
+const MAIN_CONTENT_ID = 'medplum-main-content';
+
 export type { AppShellAnnouncement } from './AnnouncementBanners';
 
 export interface AppShellProps {
@@ -109,7 +114,7 @@ export function AppShell(props: AppShellProps): JSX.Element {
       },
     };
     headerComponent = visibleAnnouncements?.length ? (
-      <MantineAppShell.Header style={{ zIndex: 101 }}>
+      <MantineAppShell.Header style={{ zIndex: 101 }} aria-label="Announcements">
         <AnnouncementBanners announcements={visibleAnnouncements} onDismiss={dismissAnnouncement} />
       </MantineAppShell.Header>
     ) : undefined;
@@ -177,7 +182,7 @@ export function AppShell(props: AppShellProps): JSX.Element {
     <MantineAppShell header={headerProp} navbar={navbarProp} padding={0}>
       {headerComponent}
       {navbarComponent}
-      <MantineAppShell.Main className={classes.main}>
+      <MantineAppShell.Main id={MAIN_CONTENT_ID} tabIndex={-1} aria-label="Main content" className={classes.main}>
         <ErrorBoundary>
           <Suspense fallback={<Loading />}>{props.children}</Suspense>
         </ErrorBoundary>

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { SearchRequest } from '@medplum/core';
 import { Operator } from '@medplum/core';
-import type { Bundle } from '@medplum/fhirtypes';
+import type { Bundle, Patient, Resource } from '@medplum/fhirtypes';
 import { HomerSimpson, MockClient } from '@medplum/mock';
 import { MedplumProvider } from '@medplum/react-hooks';
 import { act, fireEvent, render, screen } from '../test-utils/render';
@@ -1057,6 +1057,536 @@ describe('SearchControl', () => {
       });
       expect(await screen.findByText('Homer Simpson')).toBeInTheDocument();
       expect(screen.getByTestId('count-display').textContent).toBe('200,001-200,020 of 403,091');
+    });
+  });
+
+  describe('Table accessibility', () => {
+    test('Default table accessible name', async () => {
+      const props: SearchControlProps = {
+        search: {
+          resourceType: 'Patient',
+          fields: ['id', 'name'],
+        },
+        onLoad: vi.fn(),
+      };
+
+      await setup(props);
+
+      expect(await screen.findByText('Homer Simpson')).toBeInTheDocument();
+      expect(screen.getByRole('table', { name: 'Patient search results' })).toBeInTheDocument();
+    });
+
+    test('tableAriaLabel overrides the default accessible name', async () => {
+      const props: SearchControlProps = {
+        search: {
+          resourceType: 'Patient',
+          fields: ['id', 'name'],
+        },
+        tableAriaLabel: 'OAuth client security results',
+        onLoad: vi.fn(),
+      };
+
+      await setup(props);
+
+      expect(await screen.findByText('Homer Simpson')).toBeInTheDocument();
+      expect(screen.getByRole('table', { name: 'OAuth client security results' })).toBeInTheDocument();
+      expect(screen.queryByRole('table', { name: 'Patient search results' })).not.toBeInTheDocument();
+    });
+
+    test('All header cells have scope="col"', async () => {
+      const props: SearchControlProps = {
+        search: {
+          resourceType: 'Patient',
+          fields: ['id', 'name'],
+        },
+        additionalColumns: [
+          {
+            name: 'Custom Column',
+            renderCell: (resource) => <span>cell-{resource.id}</span>,
+          },
+        ],
+        checkboxesEnabled: true,
+        onLoad: vi.fn(),
+      };
+
+      await setup(props);
+
+      expect(await screen.findByText('Homer Simpson')).toBeInTheDocument();
+
+      const table = screen.getByRole('table', { name: 'Patient search results' });
+      const headerCells = Array.from(table.querySelectorAll('thead th'));
+
+      // Two header rows: checkbox + 2 fields + 1 additional column, and the same shape for the filter row.
+      expect(headerCells).toHaveLength(8);
+      for (const headerCell of headerCells) {
+        expect(headerCell).toHaveAttribute('scope', 'col');
+      }
+    });
+
+    test('aria-sort reflects the sort rules', async () => {
+      const props: SearchControlProps = {
+        search: {
+          resourceType: 'Patient',
+          fields: ['name', 'birthDate', 'unknown-field'],
+          sortRules: [{ code: 'birthdate', descending: true }],
+        },
+        onLoad: vi.fn(),
+      };
+
+      await setup(props);
+
+      expect(await screen.findByTestId('search-control')).toBeInTheDocument();
+
+      // The sort rule carries the search parameter code ("birthdate"), not the field name ("birthDate").
+      expect(screen.getByText('Birth Date').closest('th')).toHaveAttribute('aria-sort', 'descending');
+      // Only the sorted column carries aria-sort.
+      expect(screen.getByText('Name').closest('th')).not.toHaveAttribute('aria-sort');
+      expect(screen.getByText('Unknown Field').closest('th')).not.toHaveAttribute('aria-sort');
+    });
+
+    test('aria-sort is ascending for an ascending sort rule', async () => {
+      const props: SearchControlProps = {
+        search: {
+          resourceType: 'Patient',
+          fields: ['name', 'birthDate'],
+          sortRules: [{ code: 'name' }],
+        },
+        onLoad: vi.fn(),
+      };
+
+      await setup(props);
+
+      expect(await screen.findByTestId('search-control')).toBeInTheDocument();
+
+      expect(screen.getByText('Name').closest('th')).toHaveAttribute('aria-sort', 'ascending');
+      expect(screen.getByText('Birth Date').closest('th')).not.toHaveAttribute('aria-sort');
+    });
+  });
+
+  describe('Pagination accessibility', () => {
+    const search: SearchRequest = {
+      resourceType: 'Patient',
+      count: 20,
+      offset: 20,
+      fields: ['id', 'name'],
+    };
+
+    const multiPageBundle: Bundle = {
+      resourceType: 'Bundle',
+      type: 'searchset',
+      total: 60,
+      entry: [{ resource: HomerSimpson }],
+    };
+
+    function getEnabledPaginationButtons(): HTMLButtonElement[] {
+      const nav = screen.getByRole('navigation', { name: /pagination/i });
+      return Array.from(nav.querySelectorAll('button')).filter((button) => !button.disabled);
+    }
+
+    test('Pagination is a labelled navigation landmark', async () => {
+      await setup({ search, onLoad: vi.fn() }, multiPageBundle);
+
+      expect(await screen.findByText('Homer Simpson')).toBeInTheDocument();
+
+      const nav = screen.getByRole('navigation', { name: 'Patient search results pagination' });
+      expect(nav).toBeInTheDocument();
+      expect(nav.querySelector('button')).toBeInTheDocument();
+    });
+
+    test('Arrow keys move focus between pagination controls', async () => {
+      const onChange = vi.fn();
+      await setup({ search, onChange, onLoad: vi.fn() }, multiPageBundle);
+
+      expect(await screen.findByText('Homer Simpson')).toBeInTheDocument();
+
+      const buttons = getEnabledPaginationButtons();
+      expect(buttons.length).toBeGreaterThan(2);
+
+      act(() => {
+        buttons[0].focus();
+      });
+      expect(document.activeElement).toBe(buttons[0]);
+
+      await act(async () => {
+        fireEvent.keyDown(buttons[0], { key: 'ArrowRight' });
+      });
+      expect(document.activeElement).toBe(buttons[1]);
+
+      await act(async () => {
+        fireEvent.keyDown(buttons[1], { key: 'ArrowLeft' });
+      });
+      expect(document.activeElement).toBe(buttons[0]);
+
+      await act(async () => {
+        fireEvent.keyDown(buttons[0], { key: 'End' });
+      });
+      expect(document.activeElement).toBe(buttons[buttons.length - 1]);
+
+      await act(async () => {
+        fireEvent.keyDown(buttons[buttons.length - 1], { key: 'Home' });
+      });
+      expect(document.activeElement).toBe(buttons[0]);
+
+      // Focus traversal must not change the page.
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    test('Arrow keys at the ends and unrelated keys do not move focus', async () => {
+      await setup({ search, onChange: vi.fn(), onLoad: vi.fn() }, multiPageBundle);
+
+      expect(await screen.findByText('Homer Simpson')).toBeInTheDocument();
+
+      const buttons = getEnabledPaginationButtons();
+      const lastButton = buttons[buttons.length - 1];
+
+      act(() => {
+        buttons[0].focus();
+      });
+
+      await act(async () => {
+        fireEvent.keyDown(buttons[0], { key: 'ArrowLeft' });
+      });
+      expect(document.activeElement).toBe(buttons[0]);
+
+      await act(async () => {
+        fireEvent.keyDown(buttons[0], { key: 'a' });
+      });
+      expect(document.activeElement).toBe(buttons[0]);
+
+      await act(async () => {
+        fireEvent.keyDown(buttons[0], { key: 'Escape' });
+      });
+      expect(document.activeElement).toBe(buttons[0]);
+
+      act(() => {
+        lastButton.focus();
+      });
+
+      await act(async () => {
+        fireEvent.keyDown(lastButton, { key: 'ArrowRight' });
+      });
+      expect(document.activeElement).toBe(lastButton);
+    });
+
+    test('Arrow keys do nothing when focus is outside the pagination controls', async () => {
+      await setup({ search, onChange: vi.fn(), onLoad: vi.fn() }, multiPageBundle);
+
+      expect(await screen.findByText('Homer Simpson')).toBeInTheDocument();
+
+      const nav = screen.getByRole('navigation', { name: /pagination/i });
+      const previousActiveElement = document.activeElement;
+
+      await act(async () => {
+        fireEvent.keyDown(nav, { key: 'ArrowRight' });
+      });
+
+      expect(document.activeElement).toBe(previousActiveElement);
+    });
+  });
+
+  describe('Overlapping searches', () => {
+    const bartSimpson: Patient = {
+      resourceType: 'Patient',
+      id: 'bart-simpson',
+      name: [{ given: ['Bart'], family: 'Simpson' }],
+    };
+
+    function createDeferred(): { promise: Promise<Bundle>; resolve: (value: Bundle) => void } {
+      let resolve!: (value: Bundle) => void;
+      const promise = new Promise<Bundle>((res) => {
+        resolve = res;
+      });
+      return { promise, resolve };
+    }
+
+    function buildBundle(resource: Resource): Bundle {
+      return {
+        resourceType: 'Bundle',
+        type: 'searchset',
+        total: 1,
+        entry: [{ resource }],
+      };
+    }
+
+    const firstSearch: SearchRequest = {
+      resourceType: 'Patient',
+      fields: ['id', 'name'],
+      filters: [{ code: 'name', operator: Operator.EQUALS, value: 'Homer' }],
+    };
+
+    const secondSearch: SearchRequest = {
+      resourceType: 'Patient',
+      fields: ['id', 'name'],
+      filters: [{ code: 'name', operator: Operator.EQUALS, value: 'Bart' }],
+    };
+
+    test('Superseded search response is discarded', async () => {
+      const first = createDeferred();
+      const second = createDeferred();
+      const medplum = new MockClient();
+      medplum.search = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+
+      const onLoad = vi.fn();
+      const { rerender } = await setup({ search: firstSearch, onLoad }, undefined, medplum);
+
+      expect(await screen.findByTestId('search-control')).toBeInTheDocument();
+      expect(onLoad).not.toHaveBeenCalled();
+
+      // Start the second search before the first one settles.
+      await rerender({ search: secondSearch, onLoad });
+      expect(medplum.search).toHaveBeenCalledTimes(2);
+
+      // The superseded first response settles last and must be ignored entirely.
+      await act(async () => {
+        second.resolve(buildBundle(bartSimpson));
+      });
+
+      expect(await screen.findByText('Bart Simpson')).toBeInTheDocument();
+      expect(onLoad).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        first.resolve(buildBundle(HomerSimpson));
+      });
+
+      expect(screen.queryByText('Homer Simpson')).not.toBeInTheDocument();
+      expect(screen.getByText('Bart Simpson')).toBeInTheDocument();
+      expect(onLoad).toHaveBeenCalledTimes(1);
+      expect(onLoad.mock.calls[0][0].response.entry?.[0]?.resource?.id).toBe('bart-simpson');
+    });
+
+    test('Loading row replaces the previous rows while a new search is in flight', async () => {
+      const second = createDeferred();
+      const medplum = new MockClient();
+      medplum.search = vi.fn().mockResolvedValueOnce(buildBundle(HomerSimpson)).mockReturnValueOnce(second.promise);
+
+      const onLoad = vi.fn();
+      const props: SearchControlProps = {
+        search: firstSearch,
+        additionalColumns: [
+          {
+            name: 'Custom Column',
+            renderCell: (resource) => <span>cell-{resource.id}</span>,
+          },
+        ],
+        checkboxesEnabled: true,
+        onLoad,
+      };
+
+      const { rerender } = await setup(props, undefined, medplum);
+
+      expect(await screen.findByText('Homer Simpson')).toBeInTheDocument();
+      expect(screen.getByRole('table', { name: 'Patient search results' })).toHaveAttribute('aria-busy', 'false');
+
+      await rerender({ ...props, search: secondSearch });
+
+      // The previous page's rows are replaced by a single loading row while the new search is in flight.
+      const loadingRow = screen.getByTestId('search-control-loading-row');
+      expect(loadingRow).toBeInTheDocument();
+      expect(loadingRow.querySelector('td')).toHaveAttribute('colspan', '4');
+      expect(screen.queryByText('Homer Simpson')).not.toBeInTheDocument();
+      expect(screen.queryAllByTestId('search-control-row')).toHaveLength(0);
+      expect(screen.queryByText('No results')).not.toBeInTheDocument();
+      expect(screen.getByRole('table', { name: 'Patient search results' })).toHaveAttribute('aria-busy', 'true');
+
+      await act(async () => {
+        second.resolve(buildBundle(bartSimpson));
+      });
+
+      expect(await screen.findByText('Bart Simpson')).toBeInTheDocument();
+      expect(screen.queryByTestId('search-control-loading-row')).not.toBeInTheDocument();
+      expect(screen.getByRole('table', { name: 'Patient search results' })).toHaveAttribute('aria-busy', 'false');
+    });
+
+    test('Loading row suppresses the No results block between searches', async () => {
+      const second = createDeferred();
+      const medplum = new MockClient();
+      const emptyBundle: Bundle = {
+        resourceType: 'Bundle',
+        type: 'searchset',
+        total: 0,
+        entry: [],
+      };
+      medplum.search = vi.fn().mockResolvedValueOnce(emptyBundle).mockReturnValueOnce(second.promise);
+
+      const onLoad = vi.fn();
+      const { rerender } = await setup({ search: firstSearch, onLoad }, undefined, medplum);
+
+      expect(await screen.findByText('No results')).toBeInTheDocument();
+
+      await rerender({ search: secondSearch, onLoad });
+
+      expect(screen.getByTestId('search-control-loading-row')).toBeInTheDocument();
+      expect(screen.queryByText('No results')).not.toBeInTheDocument();
+
+      await act(async () => {
+        second.resolve(buildBundle(bartSimpson));
+      });
+
+      expect(await screen.findByText('Bart Simpson')).toBeInTheDocument();
+      expect(screen.queryByText('No results')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('Row region height reservation', () => {
+    const rowHeight = 37;
+    const pageSize = 20;
+    const originalGetBoundingClientRect = HTMLTableSectionElement.prototype.getBoundingClientRect;
+
+    const search: SearchRequest = {
+      resourceType: 'Patient',
+      count: pageSize,
+      offset: 0,
+      fields: ['id', 'name'],
+    };
+
+    /**
+     * Builds a search response page of distinct patients.
+     * @param count - The number of entries on the page.
+     * @param offset - The offset of the page, which also seeds the entry ids.
+     * @param total - The total number of matches across all pages.
+     * @returns A searchset Bundle of `count` patients.
+     */
+    function buildPage(count: number, offset: number, total: number): Bundle {
+      return {
+        resourceType: 'Bundle',
+        type: 'searchset',
+        total,
+        entry: Array.from({ length: count }, (_unused, index) => ({
+          resource: {
+            resourceType: 'Patient',
+            id: `patient-${offset + index}`,
+            name: [{ given: ['Patient'], family: `Number${offset + index}` }],
+          },
+        })),
+      };
+    }
+
+    function createDeferred(): { promise: Promise<Bundle>; resolve: (value: Bundle) => void } {
+      let resolve!: (value: Bundle) => void;
+      const promise = new Promise<Bundle>((res) => {
+        resolve = res;
+      });
+      return { promise, resolve };
+    }
+
+    beforeEach(() => {
+      // jsdom reports every element as zero-height, so the row region's geometry is stubbed from its rendered rows.
+      HTMLTableSectionElement.prototype.getBoundingClientRect = function (this: HTMLTableSectionElement): DOMRect {
+        const height = this.rows.length * rowHeight;
+        return {
+          x: 0,
+          y: 0,
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: height,
+          width: 0,
+          height,
+          toJSON: () => ({}),
+        };
+      };
+    });
+
+    afterEach(() => {
+      HTMLTableSectionElement.prototype.getBoundingClientRect = originalGetBoundingClientRect;
+    });
+
+    test('Full page reserves no height', async () => {
+      const medplum = new MockClient();
+      medplum.search = vi.fn().mockResolvedValue(buildPage(pageSize, 0, 27));
+
+      await setup({ search }, undefined, medplum);
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(pageSize);
+      expect(screen.queryByTestId('search-control-row-region-spacer')).not.toBeInTheDocument();
+    });
+
+    test('Short last page reserves the missing rows', async () => {
+      const medplum = new MockClient();
+      medplum.search = vi
+        .fn()
+        .mockResolvedValueOnce(buildPage(pageSize, 0, 27))
+        .mockResolvedValueOnce(buildPage(7, pageSize, 27));
+
+      const { rerender } = await setup({ search }, undefined, medplum);
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(pageSize);
+      expect(screen.queryByTestId('search-control-row-region-spacer')).not.toBeInTheDocument();
+
+      await rerender({ search: { ...search, offset: pageSize } });
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(7);
+      const spacer = screen.getByTestId('search-control-row-region-spacer');
+      // The 13 rows the short page does not render: 13 * 37 px.
+      expect(spacer.style.height).toBe('481px');
+    });
+
+    test('Reservation holds while the next page is in flight', async () => {
+      const nextPage = createDeferred();
+      const medplum = new MockClient();
+      medplum.search = vi
+        .fn()
+        .mockResolvedValueOnce(buildPage(pageSize, 0, 27))
+        .mockReturnValueOnce(nextPage.promise);
+
+      const { rerender } = await setup({ search }, undefined, medplum);
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(pageSize);
+
+      await rerender({ search: { ...search, offset: pageSize } });
+
+      expect(screen.getByTestId('search-control-loading-row')).toBeInTheDocument();
+      // The single loading row measures 37 px, so the remaining 19 rows' worth of height is held.
+      expect(screen.getByTestId('search-control-row-region-spacer').style.height).toBe('703px');
+
+      await act(async () => {
+        nextPage.resolve(buildPage(7, pageSize, 27));
+      });
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(7);
+      expect(screen.getByTestId('search-control-row-region-spacer').style.height).toBe('481px');
+    });
+
+    test('Short page reached directly reserves from the rendered rows', async () => {
+      const medplum = new MockClient();
+      medplum.search = vi.fn().mockResolvedValue(buildPage(7, pageSize, 27));
+
+      await setup({ search: { ...search, offset: pageSize } }, undefined, medplum);
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(7);
+      expect(screen.getByTestId('search-control-row-region-spacer').style.height).toBe('481px');
+    });
+
+    test('Single page result set renders no spacer', async () => {
+      const medplum = new MockClient();
+      medplum.search = vi.fn().mockResolvedValue(buildPage(7, 0, 7));
+
+      await setup({ search }, undefined, medplum);
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(7);
+      expect(screen.queryByTestId('search-control-row-region-spacer')).not.toBeInTheDocument();
+      expect(screen.getByRole('navigation', { name: /pagination/i })).toBeInTheDocument();
+    });
+
+    test('Spacer is hidden from assistive technology and rendered outside the table', async () => {
+      const medplum = new MockClient();
+      medplum.search = vi.fn().mockResolvedValue(buildPage(7, pageSize, 27));
+
+      await setup({ search: { ...search, offset: pageSize } }, undefined, medplum);
+
+      expect(await screen.findAllByTestId('search-control-row')).toHaveLength(7);
+
+      const spacer = screen.getByTestId('search-control-row-region-spacer');
+      expect(spacer).toHaveAttribute('aria-hidden', 'true');
+
+      const table = screen.getByRole('table', { name: 'Patient search results' });
+      expect(table.contains(spacer)).toBe(false);
+      expect(table.querySelectorAll('tbody tr')).toHaveLength(7);
+
+      // The reservation sits between the table and the pagination landmark.
+      const nav = screen.getByRole('navigation', { name: /pagination/i });
+      expect(spacer.compareDocumentPosition(nav) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(spacer.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
     });
   });
 });

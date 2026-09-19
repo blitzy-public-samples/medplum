@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { WithId } from '@medplum/core';
 import { ContentType, createReference } from '@medplum/core';
-import type { AuditEvent, ClientApplication, Login } from '@medplum/fhirtypes';
+import type { AuditEvent, ClientApplication, Login, OperationOutcome } from '@medplum/fhirtypes';
 import { randomUUID } from 'crypto';
 import express from 'express';
 import request from 'supertest';
@@ -101,6 +101,36 @@ describe('Auth middleware', () => {
     const res = await request(app).get('/fhir/R4/Patient').set('Authorization', 'Bearer foo');
     expect(res).toHaveStatus(401);
     expect(res.header['www-authenticate']).toBe(`Bearer realm="${getConfig().baseUrl}"`);
+  });
+
+  test.each([
+    ['three dot-separated segments that are not Base64URL JSON', 'not.a.jwt'],
+    ['an empty payload segment', 'x..y'],
+    ['a payload encoding JSON null', 'x.bnVsbA.y'],
+    ['a payload encoding a JSON number', 'x.MTIz.y'],
+    ['a payload encoding a JSON array', 'x.W10.y'],
+  ])('Bearer token with %s', async (_description: string, accessToken: string) => {
+    const res = await request(app)
+      .get('/fhir/R4/Patient')
+      .set('Authorization', 'Bearer ' + accessToken);
+    expect(res).toHaveStatus(401);
+    expect(res.header['www-authenticate']).toBe(`Bearer realm="${getConfig().baseUrl}"`);
+
+    const outcome = res.body as OperationOutcome;
+    expect(outcome).toMatchObject<OperationOutcome>({
+      resourceType: 'OperationOutcome',
+      id: 'unauthorized',
+      issue: [{ severity: 'error', code: 'login', details: { text: 'Unauthorized' } }],
+    });
+    expect(outcome.issue[0].diagnostics).toBeUndefined();
+  });
+
+  test('Malformed bearer token on an admin route', async () => {
+    const res = await request(app)
+      .get(`/admin/projects/${randomUUID()}/oauth-security`)
+      .set('Authorization', 'Bearer not.a.jwt');
+    expect(res).toHaveStatus(401);
+    expect((res.body as OperationOutcome).issue[0].diagnostics).toBeUndefined();
   });
 
   test('Basic auth empty string', async () => {

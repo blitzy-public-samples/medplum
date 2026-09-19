@@ -104,6 +104,26 @@ describe('AppShell v1', () => {
     await selectAutocompleteOption(input, 'Test');
   });
 
+  test('Landmarks are named and the skip link moves focus to main', async () => {
+    await setup();
+
+    expect(screen.getByRole('banner')).toHaveAttribute('aria-label', 'Application header');
+
+    const main = screen.getByRole('main');
+    expect(main).toHaveAttribute('aria-label', 'Main content');
+    expect(main).toHaveAttribute('id', 'medplum-main-content');
+    expect(main).toHaveAttribute('tabindex', '-1');
+
+    const skipLink = screen.getByRole('link', { name: 'Skip to main content' });
+    expect(skipLink.compareDocumentPosition(main) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(skipLink);
+    });
+
+    expect(document.activeElement).toBe(main);
+  });
+
   test('Dismissible announcement', async () => {
     await setup('v1', [
       {
@@ -258,5 +278,15 @@ describe('AppShell v2', () => {
 
     expect(screen.getByRole('alert')).toHaveTextContent('Warning: logged in as super admin');
     expect(screen.queryByLabelText('Dismiss announcement')).not.toBeInTheDocument();
+    expect(screen.getByRole('banner')).toHaveAttribute('aria-label', 'Announcements');
+  });
+
+  test('Main is named and focusable v2', async () => {
+    await setup('v2');
+
+    const main = screen.getByRole('main');
+    expect(main).toHaveAttribute('aria-label', 'Main content');
+    expect(main).toHaveAttribute('id', 'medplum-main-content');
+    expect(main).toHaveAttribute('tabindex', '-1');
   });
 });

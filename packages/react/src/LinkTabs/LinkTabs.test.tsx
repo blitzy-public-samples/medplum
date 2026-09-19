@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { Tabs } from '@mantine/core';
 import type * as MedplumCore from '@medplum/core';
 import { locationUtils } from '@medplum/core';
 import { MockClient } from '@medplum/mock';
 import { MedplumProvider } from '@medplum/react-hooks';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import type { Mocked } from 'vitest';
 import { act, fireEvent, render, screen } from '../test-utils/render';
 import { LinkTabs } from './LinkTabs';
@@ -45,6 +47,34 @@ describe('LinkTabs', () => {
     );
   }
 
+  /**
+   * Renders the tabs inside a memory router, with the Medplum navigate function wired to it.
+   * @param initialPath - The initial router path.
+   * @param props - Additional LinkTabs props.
+   * @returns The memory router, for driving navigation.
+   */
+  function setupRouter(initialPath: string, props = {}): ReturnType<typeof createMemoryRouter> {
+    const router = createMemoryRouter([{ path: '*', element: <LinkTabs {...defaultProps} {...props} /> }], {
+      initialEntries: [initialPath],
+      initialIndex: 0,
+    });
+    render(
+      <MedplumProvider medplum={medplum} navigate={(path) => router.navigate(path)}>
+        <RouterProvider router={router} />
+      </MedplumProvider>
+    );
+    return router;
+  }
+
+  /**
+   * Returns the tab button with the given label.
+   * @param name - The tab label.
+   * @returns The tab element.
+   */
+  function getTab(name: string): HTMLElement {
+    return screen.getByRole('tab', { name });
+  }
+
   test('renders tabs correctly', () => {
     setup();
     expect(screen.getByRole('tablist')).toBeInTheDocument();
@@ -75,6 +105,142 @@ describe('LinkTabs', () => {
 
     const overviewTab = screen.getByRole('tab', { name: 'Overview' });
     expect(overviewTab).toHaveAttribute('aria-selected', 'true');
+  });
+
+  test('initializes with the owning tab for a nested path below the tab', () => {
+    mockLocationUtils.getPathname.mockReturnValue('/patient/123/timeline/456');
+    setup();
+
+    expect(getTab('Timeline')).toHaveAttribute('aria-selected', 'true');
+    expect(getTab('Overview')).toHaveAttribute('aria-selected', 'false');
+  });
+
+  test('initializes with first tab when a nested path is not below the base URL', () => {
+    mockLocationUtils.getPathname.mockReturnValue('/other/456/timeline/789');
+    setup();
+
+    expect(getTab('Overview')).toHaveAttribute('aria-selected', 'true');
+  });
+
+  test('keeps the clicked tab selected when navigation does not change the location', async () => {
+    setup();
+
+    await act(async () => {
+      fireEvent.click(getTab('Timeline'));
+    });
+
+    expect(navigateMock).toHaveBeenCalledWith('/patient/123/timeline');
+    expect(getTab('Timeline')).toHaveAttribute('aria-selected', 'true');
+  });
+
+  test('selects the tab for the current router location', () => {
+    mockLocationUtils.getPathname.mockReturnValue('/');
+    setupRouter('/patient/123/timeline');
+
+    expect(getTab('Timeline')).toHaveAttribute('aria-selected', 'true');
+  });
+
+  test('selects the owning tab for a nested router location', () => {
+    mockLocationUtils.getPathname.mockReturnValue('/');
+    setupRouter('/patient/123/details/8f14e45f-ceea-467a-9575-28262f2e5f31');
+
+    expect(getTab('Details')).toHaveAttribute('aria-selected', 'true');
+    expect(getTab('Overview')).toHaveAttribute('aria-selected', 'false');
+  });
+
+  test('falls back to the browser location when the router location owns no tab', () => {
+    mockLocationUtils.getPathname.mockReturnValue('/patient/123/details');
+    setupRouter('/');
+
+    expect(getTab('Details')).toHaveAttribute('aria-selected', 'true');
+  });
+
+  test('tracks the route through back and forward navigation', async () => {
+    mockLocationUtils.getPathname.mockReturnValue('/');
+    const router = setupRouter('/patient/123/overview');
+
+    await act(async () => {
+      fireEvent.click(getTab('Timeline'));
+    });
+    expect(getTab('Timeline')).toHaveAttribute('aria-selected', 'true');
+
+    await act(async () => {
+      fireEvent.click(getTab('Details'));
+    });
+    expect(getTab('Details')).toHaveAttribute('aria-selected', 'true');
+
+    await act(async () => {
+      await router.navigate(-1);
+    });
+    expect(router.state.location.pathname).toBe('/patient/123/timeline');
+    expect(getTab('Timeline')).toHaveAttribute('aria-selected', 'true');
+    expect(getTab('Details')).toHaveAttribute('aria-selected', 'false');
+
+    await act(async () => {
+      await router.navigate(1);
+    });
+    expect(router.state.location.pathname).toBe('/patient/123/details');
+    expect(getTab('Details')).toHaveAttribute('aria-selected', 'true');
+    expect(getTab('Timeline')).toHaveAttribute('aria-selected', 'false');
+  });
+
+  test('places only the selected tab in the tab order', () => {
+    mockLocationUtils.getPathname.mockReturnValue('/patient/123/timeline');
+    setup();
+
+    expect(getTab('Timeline')).toHaveAttribute('tabindex', '0');
+    expect(getTab('Overview')).toHaveAttribute('tabindex', '-1');
+    expect(getTab('Details')).toHaveAttribute('tabindex', '-1');
+
+    for (const anchor of document.querySelectorAll('[role="tab"] a')) {
+      expect(anchor).toHaveAttribute('tabindex', '-1');
+    }
+  });
+
+  test('marks the selected tab link as the current page', () => {
+    mockLocationUtils.getPathname.mockReturnValue('/patient/123/timeline');
+    setup();
+
+    expect(screen.getByRole('link', { name: 'Timeline' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('link', { name: 'Overview' })).not.toHaveAttribute('aria-current');
+    expect(screen.getByRole('link', { name: 'Details' })).not.toHaveAttribute('aria-current');
+  });
+
+  test('omits aria-controls when no tab panels are rendered', () => {
+    setup();
+
+    expect(screen.queryAllByRole('tabpanel')).toHaveLength(0);
+    for (const tab of screen.getAllByRole('tab')) {
+      expect(tab).not.toHaveAttribute('aria-controls');
+    }
+  });
+
+  test('keeps aria-controls when tab panels are rendered', () => {
+    setup({
+      children: (
+        <Tabs.Panel value="overview">
+          <div>Overview panel</div>
+        </Tabs.Panel>
+      ),
+    });
+
+    const panel = screen.getByRole('tabpanel');
+    expect(getTab('Overview')).toHaveAttribute('aria-controls', panel.id);
+    expect(panel.id).not.toBe('');
+  });
+
+  test('renders the tab strip as a named navigation landmark', () => {
+    setup();
+
+    const nav = screen.getByRole('navigation', { name: 'Section' });
+    expect(nav).toContainElement(screen.getByRole('tablist', { name: 'Section' }));
+  });
+
+  test('uses the given aria-label for the navigation landmark and the tab list', () => {
+    setup({ 'aria-label': 'Patient' });
+
+    expect(screen.getByRole('navigation', { name: 'Patient' })).toBeInTheDocument();
+    expect(screen.getByRole('tablist', { name: 'Patient' })).toBeInTheDocument();
   });
 
   test('navigates when tab is clicked', async () => {

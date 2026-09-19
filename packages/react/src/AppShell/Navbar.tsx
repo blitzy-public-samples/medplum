@@ -10,6 +10,7 @@ import {
   Text,
   Tooltip,
   UnstyledButton,
+  VisuallyHidden,
 } from '@mantine/core';
 import { spotlight } from '@mantine/spotlight';
 import { formatHumanName } from '@medplum/core';
@@ -97,7 +98,7 @@ export function Navbar(props: NavbarProps): JSX.Element {
 
   return (
     <>
-      <MantineAppShell.Navbar id="navbar" className={classes.navbar}>
+      <MantineAppShell.Navbar id="navbar" className={classes.navbar} aria-label="Main navigation">
         {props.logo && (
           <MantineAppShell.Section px="xs" pt="xs" pb="4px">
             <UnstyledButton
@@ -226,7 +227,6 @@ export function Navbar(props: NavbarProps): JSX.Element {
                 <UnstyledButton
                   className={`${classes.link} ${classes.userLink}`}
                   pl="7"
-                  aria-label="User menu"
                   data-active={userMenuOpened || undefined}
                   onClick={() => setUserMenuOpened((o) => !o)}
                   bd="1px 0 0 0 solid var(--mantine-color-gray-200)"
@@ -237,11 +237,12 @@ export function Navbar(props: NavbarProps): JSX.Element {
                       {formatHumanName(profile?.name?.[0])}
                     </Text>
                     {projectDisplay && (
-                      <Text span inherit fz="xs" c="dimmed" truncate title={projectDisplay}>
+                      <Text span inherit fz="xs" truncate title={projectDisplay} className={classes.userLinkProject}>
                         {projectDisplay}
                       </Text>
                     )}
                   </span>
+                  <VisuallyHidden>User menu</VisuallyHidden>
                 </UnstyledButton>
               </Menu.Target>
               <Menu.Dropdown className={headerDropdownClasses.dropdown}>
