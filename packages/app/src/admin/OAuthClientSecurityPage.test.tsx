@@ -28,21 +28,43 @@ const EXACT_CLIENT_NAME = 'Exact Callback Client';
 const WILDCARD_CLIENT_NAME = 'Wildcard Client';
 const LEGACY_CLIENT_NAME = 'Legacy Callback Client';
 const NO_URI_CLIENT_NAME = 'Unconfigured Client';
+const UNBROKEN_NAME_TOKEN = 'A'.repeat(4096);
+const UNBROKEN_NAME_CLIENT_NAME = `Long Unbroken Name Client ${UNBROKEN_NAME_TOKEN}`;
+const UNBROKEN_NAME_REDIRECT_URI = 'https://long-name.example.com/oauth/callback';
 const EXACT_REDIRECT_URI = 'https://app.example.com/oauth/callback';
 const WILDCARD_REDIRECT_URI = 'https://app.example.com/*';
 const LEGACY_REDIRECT_URI = 'https://legacy.example.com/oauth/callback';
 const REVIEWED_REDIRECT_URI = 'https://app.example.com/oauth/callback/reviewed';
 const LINT_ERROR_MESSAGE = 'Security review is unavailable';
 const MALFORMED_REPORT_MESSAGE = 'The OAuth client security review returned an unexpected response.';
+const REQUEST_FAILED_MESSAGE = 'The OAuth client security review could not be loaded.';
 const UNRECOGNIZED_STATUS = 'completed';
-const FILTER_NOTICE_PATTERN = /column filter is applied/i;
 const SORT_PARAMETER = '_sort=name';
-const NAME_CONTAINS_PARAMETER = 'name%3Acontains=';
+const FILTER_PARAMETER_PATTERN = /[?&]name/;
+const COLUMN_MENU_OPTIONS = ['Contains...', 'Clear filters', 'Sort A to Z'];
 const SEEDED_CLIENT_NAME = 'Seeded Callback Client';
 const OUT_OF_BAND_CLIENT_NAME = 'Out Of Band Client';
 const OUT_OF_BAND_REDIRECT_URI = 'https://out-of-band.example.com/oauth/callback';
+const NAMELESS_REDIRECT_URI = 'https://nameless.example.com/oauth/callback';
 
-const DISPLAY_CLIENT_COUNT = 4;
+const RIGHT_TO_LEFT_OVERRIDE = '\u202E';
+const POP_DIRECTIONAL_FORMATTING = '\u202C';
+const BIDI_CLIENT_NAME = `Bidi Name Client ${RIGHT_TO_LEFT_OVERRIDE}evil.moc${POP_DIRECTIONAL_FORMATTING}`;
+const ESCAPED_BIDI_CLIENT_NAME = 'Bidi Name Client <U+202E>evil.moc<U+202C>';
+const BIDI_REDIRECT_URI = `https://gpj.${RIGHT_TO_LEFT_OVERRIDE}moc.kcatta${POP_DIRECTIONAL_FORMATTING}/cb*`;
+const ESCAPED_BIDI_REDIRECT_URI = 'https://gpj.<U+202E>moc.kcatta<U+202C>/cb*';
+
+const HOSTILE_UPSTREAM_BODY =
+  '<h1>Error: ENOENT no such file</h1> at Repository.search (/app/packages/server/dist/fhir/repo.js:1730:15) http://localhost:8291/admin/projects/secret-internal/oauth-security';
+const HOSTILE_UPSTREAM_FRAGMENTS = [
+  'ENOENT',
+  'Repository.search',
+  '/app/packages/server/dist/fhir/repo.js:1730:15',
+  'localhost:8291',
+  '/admin/projects/secret-internal/oauth-security',
+];
+
+const DISPLAY_CLIENT_COUNT = 5;
 const SECOND_PAGE_CLIENT_COUNT = 2;
 const FILLER_CLIENT_COUNT = DEFAULT_SEARCH_COUNT + SECOND_PAGE_CLIENT_COUNT - DISPLAY_CLIENT_COUNT;
 const FILLER_CLIENT_NAME_PREFIX = 'Zz Filler Client ';
@@ -346,7 +368,7 @@ function createReviewerClient(): MockClient {
 /**
  * Finds the table header cell carrying the given column name.
  * @param columnName - The column header text.
- * @returns The element holding the header text, which opens the column menu when clicked.
+ * @returns The element holding the header text.
  */
 function getColumnHeader(columnName: string): HTMLElement {
   const header = screen.getAllByText(columnName).find((element) => element.closest('th'));
@@ -354,42 +376,6 @@ function getColumnHeader(columnName: string): HTMLElement {
     throw new Error(`No column header found for "${columnName}"`);
   }
   return header;
-}
-
-/**
- * Applies a "contains" filter through the column header menu the table leaves available.
- * @param columnName - The column header to filter on.
- * @param value - The value the filter matches.
- */
-async function applyContainsFilter(columnName: string, value: string): Promise<void> {
-  await act(async () => {
-    fireEvent.click(getColumnHeader(columnName));
-  });
-  await act(async () => {
-    fireEvent.click(await screen.findByText('Contains...'));
-  });
-  await act(async () => {
-    fireEvent.change(screen.getByPlaceholderText('Search value'), { target: { value } });
-  });
-  await act(async () => {
-    fireEvent.click(screen.getByText('OK'));
-  });
-  await waitFor(() => {
-    expect(document.querySelector('.mantine-Modal-title')).toBeNull();
-  });
-}
-
-/**
- * Clears every filter on one column through the column header menu.
- * @param columnName - The column header whose filters are cleared.
- */
-async function clearFilters(columnName: string): Promise<void> {
-  await act(async () => {
-    fireEvent.click(getColumnHeader(columnName));
-  });
-  await act(async () => {
-    fireEvent.click(await screen.findByText('Clear filters'));
-  });
 }
 
 describe('OAuthClientSecurityPage', () => {
@@ -409,6 +395,7 @@ describe('OAuthClientSecurityPage', () => {
     await seedClient(WILDCARD_CLIENT_NAME, 'fail', { redirectUris: [WILDCARD_REDIRECT_URI] });
     await seedClient(LEGACY_CLIENT_NAME, 'warning', { redirectUri: LEGACY_REDIRECT_URI });
     await seedClient(NO_URI_CLIENT_NAME, 'pass');
+    await seedClient(UNBROKEN_NAME_CLIENT_NAME, 'pass', { redirectUris: [UNBROKEN_NAME_REDIRECT_URI] });
     for (let i = 0; i < FILLER_CLIENT_COUNT; i++) {
       await seedClient(`${FILLER_CLIENT_NAME_PREFIX}${i}`, 'pass', {
         redirectUris: [`https://filler-${i}.example.com/oauth/callback`],
@@ -689,28 +676,34 @@ describe('OAuthClientSecurityPage', () => {
       expect(searchCallUrls(reviewer).length).toBeGreaterThan(searchesOnFirstVisit);
     });
 
-    test('Discloses that a column filter is narrowing the review, and stops disclosing it once cleared', async () => {
+    test('Offers no way to narrow the review through the UI, and keeps requesting the defined order', async () => {
       await setup();
 
       await waitFor(() => {
         expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('pass');
       });
-      expect(screen.queryByText(FILTER_NOTICE_PATTERN)).not.toBeInTheDocument();
 
-      await applyContainsFilter('Name', EXACT_CLIENT_NAME);
+      const nameHeader = getColumnHeader('Name');
+      expect(nameHeader.closest('button')).toBeNull();
+      expect(document.querySelectorAll('thead button')).toHaveLength(0);
+      expect(document.querySelector('thead [aria-sort]')).toBeNull();
 
-      await waitFor(() => {
-        expect(renderedClientNames()).toStrictEqual([EXACT_CLIENT_NAME]);
+      await act(async () => {
+        fireEvent.click(nameHeader);
       });
-      expect(screen.getByText(FILTER_NOTICE_PATTERN)).toBeInTheDocument();
-      expect(searchCallUrls().at(-1)).toContain(NAME_CONTAINS_PARAMETER);
 
-      await clearFilters('Name');
+      expect(document.querySelector('[role="menu"]')).toBeNull();
+      for (const option of COLUMN_MENU_OPTIONS) {
+        expect(screen.queryByText(option)).not.toBeInTheDocument();
+      }
+      expect(renderedClientNames()).toHaveLength(DEFAULT_SEARCH_COUNT);
 
-      await waitFor(() => {
-        expect(renderedClientNames()).toHaveLength(DEFAULT_SEARCH_COUNT);
-      });
-      expect(screen.queryByText(FILTER_NOTICE_PATTERN)).not.toBeInTheDocument();
+      const requestedSearches = searchCallUrls();
+      expect(requestedSearches.length).toBeGreaterThan(0);
+      for (const url of requestedSearches) {
+        expect(url).toContain(SORT_PARAMETER);
+        expect(url).not.toMatch(FILTER_PARAMETER_PATTERN);
+      }
     });
   });
 
@@ -737,6 +730,94 @@ describe('OAuthClientSecurityPage', () => {
       for (const uri of [EXACT_REDIRECT_URI, WILDCARD_REDIRECT_URI, LEGACY_REDIRECT_URI]) {
         expect(getComputedStyle(screen.getByText(uri)).overflowWrap).toBe('anywhere');
       }
+    });
+
+    test('Renders a client name so an unbroken token breaks inside its cell', async () => {
+      await setup();
+
+      await waitFor(() => {
+        expect(getSecurityCellText(UNBROKEN_NAME_CLIENT_NAME)).toBe('pass');
+      });
+
+      const nameText = screen.getByText(UNBROKEN_NAME_CLIENT_NAME);
+      expect(getComputedStyle(nameText).overflowWrap).toBe('anywhere');
+      expect(getCell(UNBROKEN_NAME_CLIENT_NAME, NAME_COLUMN_INDEX)).toContainElement(nameText);
+      expect(getCellText(UNBROKEN_NAME_CLIENT_NAME, NAME_COLUMN_INDEX)).toBe(UNBROKEN_NAME_CLIENT_NAME);
+      expect(getComputedStyle(screen.getByText(UNBROKEN_NAME_REDIRECT_URI)).overflowWrap).toBe('anywhere');
+      expect(getColumnHeaders()).toStrictEqual(COLUMN_HEADERS);
+    });
+
+    test('Marks the name cell empty for a client that carries no name, and names its detail link by id', async () => {
+      const reviewer = createReviewerClient();
+      const namelessClient = await reviewer.createResource<ClientApplication>({
+        resourceType: 'ClientApplication',
+        redirectUris: [NAMELESS_REDIRECT_URI],
+        meta: { project: PROJECT_ID },
+      });
+      lintResponder = async () => ({
+        total: 1,
+        offset: 0,
+        count: DEFAULT_SEARCH_COUNT,
+        results: [
+          {
+            id: namelessClient.id,
+            redirectUris: [NAMELESS_REDIRECT_URI],
+            status: 'pass',
+            findings: [],
+          },
+        ],
+      });
+
+      renderAppRoutes(reviewer, '/admin/oauth-security');
+
+      expect(await screen.findByText(NAMELESS_REDIRECT_URI)).toBeInTheDocument();
+      await waitFor(() => {
+        expect(getSecurityCellText(NAMELESS_REDIRECT_URI)).toBe('pass');
+      });
+
+      expect(getCellText(NAMELESS_REDIRECT_URI, NAME_COLUMN_INDEX)).toBe(EM_DASH);
+      expect(getDetailLink(NAMELESS_REDIRECT_URI)).toHaveAccessibleName(`${DETAIL_LINK_TEXT} ${namelessClient.id}`);
+    });
+
+    test('Escapes bidirectional control characters in the name and redirect URI cells', async () => {
+      const reviewer = createReviewerClient();
+      const bidiClient = await reviewer.createResource<ClientApplication>({
+        resourceType: 'ClientApplication',
+        name: BIDI_CLIENT_NAME,
+        redirectUris: [BIDI_REDIRECT_URI],
+        meta: { project: PROJECT_ID },
+      });
+      lintResponder = async () => ({
+        total: 1,
+        offset: 0,
+        count: DEFAULT_SEARCH_COUNT,
+        results: [
+          {
+            id: bidiClient.id,
+            name: BIDI_CLIENT_NAME,
+            redirectUris: [BIDI_REDIRECT_URI],
+            status: 'warning',
+            findings: [],
+          },
+        ],
+      });
+
+      renderAppRoutes(reviewer, '/admin/oauth-security');
+
+      expect(await screen.findByText(ESCAPED_BIDI_CLIENT_NAME)).toBeInTheDocument();
+      await waitFor(() => {
+        expect(getSecurityCellText(ESCAPED_BIDI_CLIENT_NAME)).toBe('warning');
+      });
+
+      expect(getCellText(ESCAPED_BIDI_CLIENT_NAME, NAME_COLUMN_INDEX)).toBe(ESCAPED_BIDI_CLIENT_NAME);
+      expect(getRedirectUriCellText(ESCAPED_BIDI_CLIENT_NAME)).toBe(ESCAPED_BIDI_REDIRECT_URI);
+      expect(screen.queryByText(BIDI_CLIENT_NAME)).not.toBeInTheDocument();
+      expect(screen.queryByText(BIDI_REDIRECT_URI)).not.toBeInTheDocument();
+      expect(document.body.textContent).not.toContain(RIGHT_TO_LEFT_OVERRIDE);
+      expect(document.body.textContent).not.toContain(POP_DIRECTIONAL_FORMATTING);
+      expect(getDetailLink(ESCAPED_BIDI_CLIENT_NAME)).toHaveAccessibleName(
+        `${DETAIL_LINK_TEXT} ${ESCAPED_BIDI_CLIENT_NAME}`
+      );
     });
 
     test('Reserves the same security column size while a status is loading, resolved and unavailable', async () => {
@@ -954,71 +1035,88 @@ describe('OAuthClientSecurityPage', () => {
     test('A failed security request settles every status, keeps the row redirect URIs and raises a notification', async () => {
       const deferred = createDeferred<LintReport>();
       lintResponder = () => deferred.promise;
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-      await setup();
+      try {
+        await setup();
 
-      await waitFor(() => {
-        expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('');
-      });
+        await waitFor(() => {
+          expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('');
+        });
 
-      const loadingNames = renderedClientNames();
-      expect(loadingNames).toHaveLength(DEFAULT_SEARCH_COUNT);
-      expect(skeletonCount()).toBe(loadingNames.length);
-      expect(getCell(EXACT_CLIENT_NAME, SECURITY_COLUMN_INDEX).querySelector(SKELETON_SELECTOR)).not.toBeNull();
-      expect(getCell(EXACT_CLIENT_NAME, REDIRECT_URI_COLUMN_INDEX).querySelector(SKELETON_SELECTOR)).toBeNull();
-      expect(getRedirectUriCellText(EXACT_CLIENT_NAME)).toBe(EXACT_REDIRECT_URI);
+        const loadingNames = renderedClientNames();
+        expect(loadingNames).toHaveLength(DEFAULT_SEARCH_COUNT);
+        expect(skeletonCount()).toBe(loadingNames.length);
+        expect(getCell(EXACT_CLIENT_NAME, SECURITY_COLUMN_INDEX).querySelector(SKELETON_SELECTOR)).not.toBeNull();
+        expect(getCell(EXACT_CLIENT_NAME, REDIRECT_URI_COLUMN_INDEX).querySelector(SKELETON_SELECTOR)).toBeNull();
+        expect(getRedirectUriCellText(EXACT_CLIENT_NAME)).toBe(EXACT_REDIRECT_URI);
 
-      await act(async () => {
-        deferred.reject(new Error(LINT_ERROR_MESSAGE));
-      });
+        const upstreamFailure = new Error(HOSTILE_UPSTREAM_BODY);
+        await act(async () => {
+          deferred.reject(upstreamFailure);
+        });
 
-      expect(await screen.findByText(LINT_ERROR_MESSAGE)).toBeInTheDocument();
+        expect(await screen.findByText(REQUEST_FAILED_MESSAGE)).toBeInTheDocument();
+        expect(screen.queryByText(HOSTILE_UPSTREAM_BODY)).not.toBeInTheDocument();
+        for (const fragment of HOSTILE_UPSTREAM_FRAGMENTS) {
+          expect(document.body.textContent).not.toContain(fragment);
+        }
+        expect(consoleError).toHaveBeenCalledWith(upstreamFailure);
 
-      await waitFor(() => {
-        expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe(EM_DASH);
-      });
+        await waitFor(() => {
+          expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe(EM_DASH);
+        });
 
-      expect(renderedClientNames()).toStrictEqual(loadingNames);
-      for (const name of loadingNames) {
-        const securityCell = getCell(name, SECURITY_COLUMN_INDEX);
-        expect(securityCell.textContent).toBe(EM_DASH);
-        expect(securityCell.querySelector(SKELETON_SELECTOR)).toBeNull();
-        const redirectUriCell = getCell(name, REDIRECT_URI_COLUMN_INDEX);
-        expect(redirectUriCell.textContent).toBe(expectedRowRedirectUriText(name));
-        expect(redirectUriCell.querySelector(SKELETON_SELECTOR)).toBeNull();
+        expect(renderedClientNames()).toStrictEqual(loadingNames);
+        for (const name of loadingNames) {
+          const securityCell = getCell(name, SECURITY_COLUMN_INDEX);
+          expect(securityCell.textContent).toBe(EM_DASH);
+          expect(securityCell.querySelector(SKELETON_SELECTOR)).toBeNull();
+          const redirectUriCell = getCell(name, REDIRECT_URI_COLUMN_INDEX);
+          expect(redirectUriCell.textContent).toBe(expectedRowRedirectUriText(name));
+          expect(redirectUriCell.querySelector(SKELETON_SELECTOR)).toBeNull();
+        }
+        expect(getRedirectUriCellText(EXACT_CLIENT_NAME)).toBe(EXACT_REDIRECT_URI);
+        expect(getRedirectUriCellText(LEGACY_CLIENT_NAME)).toBe(LEGACY_REDIRECT_URI);
+        expect(getRedirectUriCellText(NO_URI_CLIENT_NAME)).toBe(EM_DASH);
+        expect(skeletonCount()).toBe(0);
+      } finally {
+        consoleError.mockRestore();
       }
-      expect(getRedirectUriCellText(EXACT_CLIENT_NAME)).toBe(EXACT_REDIRECT_URI);
-      expect(getRedirectUriCellText(LEGACY_CLIENT_NAME)).toBe(LEGACY_REDIRECT_URI);
-      expect(getRedirectUriCellText(NO_URI_CLIENT_NAME)).toBe(EM_DASH);
-      expect(skeletonCount()).toBe(0);
     });
 
     test('The failure notification offers a close button with an accessible name', async () => {
       const deferred = createDeferred<LintReport>();
       lintResponder = () => deferred.promise;
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-      await setup();
+      try {
+        await setup();
 
-      await waitFor(() => {
-        expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('');
-      });
+        await waitFor(() => {
+          expect(getSecurityCellText(EXACT_CLIENT_NAME)).toBe('');
+        });
 
-      await act(async () => {
-        deferred.reject(new Error(LINT_ERROR_MESSAGE));
-      });
+        await act(async () => {
+          deferred.reject(new Error(LINT_ERROR_MESSAGE));
+        });
 
-      expect(await screen.findByText(LINT_ERROR_MESSAGE)).toBeInTheDocument();
-      const dismissButton = screen.getByRole('button', { name: 'Dismiss' });
-      expect(dismissButton).toBeInTheDocument();
-      expect(dismissButton.closest('.mantine-Notification-root')).not.toBeNull();
-
-      await act(async () => {
-        fireEvent.click(dismissButton);
-      });
-
-      await waitFor(() => {
+        expect(await screen.findByText(REQUEST_FAILED_MESSAGE)).toBeInTheDocument();
         expect(screen.queryByText(LINT_ERROR_MESSAGE)).not.toBeInTheDocument();
-      });
+        const dismissButton = screen.getByRole('button', { name: 'Dismiss' });
+        expect(dismissButton).toBeInTheDocument();
+        expect(dismissButton.closest('.mantine-Notification-root')).not.toBeNull();
+
+        await act(async () => {
+          fireEvent.click(dismissButton);
+        });
+
+        await waitFor(() => {
+          expect(screen.queryByText(REQUEST_FAILED_MESSAGE)).not.toBeInTheDocument();
+        });
+      } finally {
+        consoleError.mockRestore();
+      }
     });
 
     test('A rejected security response for a previous page neither overwrites the current page nor notifies', async () => {
@@ -1028,6 +1126,7 @@ describe('OAuthClientSecurityPage', () => {
         deferreds.push(deferred);
         return deferred.promise;
       };
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
       await setup();
 
@@ -1056,16 +1155,21 @@ describe('OAuthClientSecurityPage', () => {
         expect(getSecurityCellText(nextPageNames[0])).toBe('warning');
       });
 
-      await act(async () => {
-        deferreds[0].reject(new Error(LINT_ERROR_MESSAGE));
-      });
+      try {
+        await act(async () => {
+          deferreds[0].reject(new Error(LINT_ERROR_MESSAGE));
+        });
 
-      for (const name of nextPageNames) {
-        expect(getSecurityCellText(name)).toBe('warning');
+        for (const name of nextPageNames) {
+          expect(getSecurityCellText(name)).toBe('warning');
+        }
+        expect(screen.queryByText(REQUEST_FAILED_MESSAGE)).not.toBeInTheDocument();
+        expect(screen.queryByText(LINT_ERROR_MESSAGE)).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Dismiss' })).not.toBeInTheDocument();
+        expect(skeletonCount()).toBe(0);
+      } finally {
+        consoleError.mockRestore();
       }
-      expect(screen.queryByText(LINT_ERROR_MESSAGE)).not.toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: 'Dismiss' })).not.toBeInTheDocument();
-      expect(skeletonCount()).toBe(0);
     });
   });
 

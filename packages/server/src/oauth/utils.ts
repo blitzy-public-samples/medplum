@@ -1235,8 +1235,8 @@ async function tryExternalAuth(
     return undefined;
   }
 
-  const claims = parseJWTPayload(accessToken);
-  if (!hasIssuer(claims)) {
+  const claims = tryParseJwtClaims(accessToken);
+  if (!claims || !hasIssuer(claims)) {
     return undefined;
   }
   const issuer = claims.iss;
@@ -1459,6 +1459,24 @@ export function hashCode(code: string): string {
     .replaceAll('+', '-')
     .replaceAll('/', '_')
     .replaceAll('=', '');
+}
+
+/**
+ * Parses the claims of a token whose three-part JWT shape has been checked but whose payload has not.
+ * @param accessToken - The access token as provided by the client.
+ * @returns The claims, or undefined if the payload is not Base64URL-encoded JSON describing an object.
+ */
+function tryParseJwtClaims(accessToken: string): JWTPayload | undefined {
+  let claims: unknown;
+  try {
+    claims = parseJWTPayload(accessToken);
+  } catch {
+    return undefined;
+  }
+  if (typeof claims !== 'object' || claims === null) {
+    return undefined;
+  }
+  return claims as JWTPayload;
 }
 
 function hasIssuer(claims: JWTPayload): claims is JWTPayload & { iss: string } {

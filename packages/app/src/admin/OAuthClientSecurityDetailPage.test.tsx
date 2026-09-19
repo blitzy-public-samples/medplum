@@ -75,6 +75,12 @@ const WILDCARD_URI = 'https://app.example.com/*';
 const EXACT_URI = 'https://app.example.com/oauth/callback';
 const LONG_BARE_ORIGIN_URI = 'https://' + 'b'.repeat(250) + '.example.com';
 const LONG_NAME = 'qa-long-name-' + 'x'.repeat(107);
+const RIGHT_TO_LEFT_OVERRIDE = '\u202E';
+const POP_DIRECTIONAL_FORMATTING = '\u202C';
+const BIDI_NAME = 'Bidi Detail Client ' + RIGHT_TO_LEFT_OVERRIDE + 'evil.moc' + POP_DIRECTIONAL_FORMATTING;
+const ESCAPED_BIDI_NAME = 'Bidi Detail Client <U+202E>evil.moc<U+202C>';
+const BIDI_URI = 'https://gpj.' + RIGHT_TO_LEFT_OVERRIDE + 'moc.kcatta' + POP_DIRECTIONAL_FORMATTING + '/cb*';
+const ESCAPED_BIDI_URI = 'https://gpj.<U+202E>moc.kcatta<U+202C>/cb*';
 const ERROR_MESSAGE = 'OAuth security report unavailable';
 const NOT_VISIBLE_MESSAGE = 'This OAuth client is not visible in this project.';
 const MALFORMED_REPORT_MESSAGE = 'The OAuth client security report could not be read.';
@@ -337,6 +343,40 @@ describe('OAuthClientSecurityDetailPage', () => {
     expect(region.querySelector('.mantine-Alert-message')).toHaveStyle({ minWidth: '0px' });
     expect(screen.getByText(OCS_001_REASON)).toBeInTheDocument();
     expect(screen.getByText(OCS_001_REMEDIATION)).toBeInTheDocument();
+  });
+
+  test('Escapes bidirectional control characters in the heading and the finding URI line', async () => {
+    lintReport = async () =>
+      report({
+        id: CLIENT_ID,
+        name: BIDI_NAME,
+        redirectUris: [BIDI_URI],
+        status: 'fail',
+        findings: [
+          {
+            ruleId: 'OCS-002',
+            status: 'fail',
+            redirectUri: BIDI_URI,
+            reason: OCS_002_REASON,
+            remediation: OCS_002_REMEDIATION,
+          },
+        ],
+      });
+
+    await setup();
+
+    const heading = await screen.findByRole('heading', { name: ESCAPED_BIDI_NAME });
+    expect(heading.tagName).toBe('H4');
+    expect(heading.textContent).toBe(ESCAPED_BIDI_NAME);
+
+    const uriLine = screen.getByText(ESCAPED_BIDI_URI);
+    expect(screen.getByRole('region', { name: 'OCS-002' })).toContainElement(uriLine);
+    expect(screen.queryByText(BIDI_NAME)).not.toBeInTheDocument();
+    expect(screen.queryByText(BIDI_URI)).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(RIGHT_TO_LEFT_OVERRIDE);
+    expect(document.body.textContent).not.toContain(POP_DIRECTIONAL_FORMATTING);
+    expect(screen.getByText(OCS_002_REASON)).toBeInTheDocument();
+    expect(screen.getByText(OCS_002_REMEDIATION)).toBeInTheDocument();
   });
 
   test('Orders the findings by rule id rather than by the order the report returned them', async () => {

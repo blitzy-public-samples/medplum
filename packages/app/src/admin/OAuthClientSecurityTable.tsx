@@ -3,7 +3,7 @@
 import { Box, rem, Skeleton, Stack, Text } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
 import type { SearchRequest } from '@medplum/core';
-import { DEFAULT_SEARCH_COUNT, normalizeErrorString, Operator } from '@medplum/core';
+import { DEFAULT_SEARCH_COUNT, Operator } from '@medplum/core';
 import type { ClientApplication, Resource } from '@medplum/fhirtypes';
 import type { SearchControlAdditionalColumn, SearchLoadEvent } from '@medplum/react';
 import { MedplumLink, SearchControl, StatusBadge, useMedplum } from '@medplum/react';
@@ -57,14 +57,28 @@ const STATUS_LABEL_COLOR = 'black';
 
 const MALFORMED_REPORT_MESSAGE = 'The OAuth client security review returned an unexpected response.';
 
+const REQUEST_FAILED_MESSAGE = 'The OAuth client security review could not be loaded.';
+
 const DISMISS_BUTTON_PROPS = { 'aria-label': 'Dismiss' };
 
 const PROJECT_FILTER_CODE = '_project';
 
-const FILTER_NOTICE =
-  'A column filter is applied, so this review lists only the OAuth clients that match it. Clear the filter from the column header menu to review every client again.';
-
 const CLIENT_APPLICATION_SORT_CODE = 'name';
+
+const BIDI_CONTROL_PATTERN = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+
+/**
+ * Replaces every Unicode bidirectional control character of a string with a visible code point token.
+ * @param value - The text to render, as the security report or the searched resource carries it.
+ * @returns The same text with each bidirectional control replaced by its `<U+XXXX>` token, unchanged when it
+ * carries none.
+ */
+function escapeBidiControls(value: string): string {
+  return value.replace(
+    BIDI_CONTROL_PATTERN,
+    (control) => '<U+' + control.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0') + '>'
+  );
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -136,7 +150,7 @@ const STATUS_PLACEHOLDER_HEIGHT = 20;
 const STATUS_PLACEHOLDER_WIDTH = 74;
 const DETAIL_PATH_PREFIX = '/admin/oauth-security/';
 const DETAIL_LINK_TEXT = 'Review';
-const URI_TEXT_STYLE: CSSProperties = { overflowWrap: 'anywhere' };
+const CELL_TEXT_STYLE: CSSProperties = { overflowWrap: 'anywhere' };
 
 function renderEmptyCell(): JSX.Element {
   return (
@@ -173,15 +187,6 @@ function getResourceRedirectUris(resource: Resource): string[] {
 }
 
 /**
- * Reports whether the search carries any filter beyond the project scope the table always applies.
- * @param search - The search request currently driving the table.
- * @returns True when a filter narrows the listed clients to a subset of the project's clients.
- */
-function isNarrowedByFilter(search: SearchRequest): boolean {
-  return (search.filters ?? []).some((filter) => filter.code !== PROJECT_FILTER_CODE);
-}
-
-/**
  * Renders the read-only OAuth client security review table for the current project.
  * @returns The table of client applications with their registered redirect URIs and security status.
  */
@@ -195,7 +200,7 @@ export function OAuthClientSecurityTable(): JSX.Element {
 
   const [search, setSearch] = useState<SearchRequest>({
     resourceType: 'ClientApplication',
-    fields: ['name'],
+    fields: [],
     filters: [{ code: PROJECT_FILTER_CODE, operator: Operator.EQUALS, value: projectId }],
     sortRules: [{ code: CLIENT_APPLICATION_SORT_CODE }],
     count: DEFAULT_SEARCH_COUNT,
@@ -252,6 +257,7 @@ export function OAuthClientSecurityTable(): JSX.Element {
           }
         })
         .catch((err: unknown) => {
+          console.error(err);
           if (requestGenerationRef.current !== generation) {
             return;
           }
@@ -262,7 +268,7 @@ export function OAuthClientSecurityTable(): JSX.Element {
           setCellStates(nextStates);
           showNotification({
             color: 'red',
-            message: normalizeErrorString(err),
+            message: REQUEST_FAILED_MESSAGE,
             autoClose: false,
             closeButtonProps: DISMISS_BUTTON_PROPS,
           });
@@ -273,6 +279,20 @@ export function OAuthClientSecurityTable(): JSX.Element {
 
   const additionalColumns = useMemo<SearchControlAdditionalColumn[]>(
     () => [
+      {
+        name: 'Name',
+        renderCell: (resource: Resource): ReactNode => {
+          const { name } = resource as ClientApplication;
+          if (!name) {
+            return renderEmptyCell();
+          }
+          return (
+            <Text size="sm" style={CELL_TEXT_STYLE}>
+              {escapeBidiControls(name)}
+            </Text>
+          );
+        },
+      },
       {
         name: 'Security',
         renderCell: (resource: Resource): ReactNode => {
@@ -308,8 +328,8 @@ export function OAuthClientSecurityTable(): JSX.Element {
           return (
             <Stack gap="xs">
               {uris.map((uri, index) => (
-                <Text key={`${index}-${uri}`} size="sm" style={URI_TEXT_STYLE}>
-                  {uri}
+                <Text key={`${index}-${uri}`} size="sm" style={CELL_TEXT_STYLE}>
+                  {escapeBidiControls(uri)}
                 </Text>
               ))}
             </Stack>
@@ -327,7 +347,7 @@ export function OAuthClientSecurityTable(): JSX.Element {
           return (
             <MedplumLink
               to={`${DETAIL_PATH_PREFIX}${clientId}`}
-              label={`${DETAIL_LINK_TEXT} ${name ?? clientId}`}
+              label={`${DETAIL_LINK_TEXT} ${escapeBidiControls(name ?? clientId)}`}
               size="sm"
             >
               {DETAIL_LINK_TEXT}
@@ -340,22 +360,15 @@ export function OAuthClientSecurityTable(): JSX.Element {
   );
 
   return (
-    <>
-      {isNarrowedByFilter(search) && (
-        <Text c="dimmed" size="sm" mb="md" role="status">
-          {FILTER_NOTICE}
-        </Text>
-      )}
-      <SearchControl
-        search={search}
-        hideToolbar
-        hideFilters
-        onChange={(e) => setSearch(e.definition)}
-        onClick={(e) => navigate(`./${e.resource.id}`)}
-        onAuxClick={(e) => navigate(`./${e.resource.id}`)}
-        onLoad={handleLoad}
-        additionalColumns={additionalColumns}
-      />
-    </>
+    <SearchControl
+      search={search}
+      hideToolbar
+      hideFilters
+      onChange={(e) => setSearch(e.definition)}
+      onClick={(e) => navigate(`./${e.resource.id}`)}
+      onAuxClick={(e) => navigate(`./${e.resource.id}`)}
+      onLoad={handleLoad}
+      additionalColumns={additionalColumns}
+    />
   );
 }

@@ -37,6 +37,21 @@ const BUILT_IN_DISCOVERABLE_REMEDIATION =
 const NO_REDIRECT_URI_REASON =
   'No redirect URI is configured, so this client cannot take part in a redirect-based authorization flow and no redirect risk applies.';
 const NO_REDIRECT_URI_REMEDIATION = 'None required.';
+const UNPARSEABLE_REDIRECT_URI_REASON =
+  'This registered redirect URI value cannot be parsed as an absolute URL, so the redirect URI checks could not be applied to it and this client is reported as unevaluated rather than clean. A value a URL parser rejects is still stored, is still compared against an incoming authorization request as an exact string, and can carry invisible characters that make it read as a different address than the one registered.';
+const UNPARSEABLE_REDIRECT_URI_REMEDIATION =
+  'Inspect the stored value directly rather than the text shown here, then remove the entry or replace it with one exact, fully qualified callback URL — for example https://app.example.com/oauth/callback.';
+
+/** A bare origin whose host carries a right-to-left override, which `new URL()` rejects. */
+const BIDI_BARE_ORIGIN_URI = 'https://\u202Emoc.live\u202C.example.com';
+
+/** The clean equivalent of {@link BIDI_BARE_ORIGIN_URI}, which parses and is a bare origin. */
+const CLEAN_BARE_ORIGIN_URI = 'https://victim.example.com';
+
+/** A redirect URI carrying a right-to-left override inside its path, which `new URL()` accepts. */
+const BIDI_PATH_URI = 'https://safe.example.com/\u202Egpj.exe\u202C';
+
+const EXACT_CALLBACK_URI = 'https://ok.example.com/cb';
 
 function client(props: Partial<ClientApplication> = {}): WithId<ClientApplication> {
   return { ...props, resourceType: 'ClientApplication', id: props.id ?? TEST_CLIENT_ID };
@@ -65,8 +80,17 @@ const unparseableCases: {
   expectedRuleIds: OAuthClientLintRuleId[];
   expectedStatus: OAuthClientLintStatus;
 }[] = [
-  { redirectUri: 'not a url', expectedRuleIds: [], expectedStatus: 'pass' },
-  { redirectUri: 'not a url/*', expectedRuleIds: ['OCS-002'], expectedStatus: 'fail' },
+  { redirectUri: 'not a url', expectedRuleIds: ['OCS-006'], expectedStatus: 'warning' },
+  { redirectUri: 'not a url/*', expectedRuleIds: ['OCS-006', 'OCS-002'], expectedStatus: 'fail' },
+];
+
+/** Registered values `new URL()` rejects, each of which OCS-006 must report as unevaluated. */
+const unparseableRedirectUris: string[] = [BIDI_BARE_ORIGIN_URI, '://', 'http://', 'not a url'];
+
+/** Stored `redirectUris` shapes that are not arrays, each of which counts as one unevaluable entry. */
+const nonArrayRedirectUrisCases: { name: string; redirectUris: unknown }[] = [
+  { name: 'a bare string', redirectUris: EXACT_CALLBACK_URI },
+  { name: 'an object', redirectUris: { url: EXACT_CALLBACK_URI } },
 ];
 
 const registrationCases: {
@@ -231,6 +255,13 @@ const copyCases: {
     subject: client(),
     expectedReason: NO_REDIRECT_URI_REASON,
     expectedRemediation: NO_REDIRECT_URI_REMEDIATION,
+  },
+  {
+    name: 'OCS-006',
+    ruleId: 'OCS-006',
+    subject: client({ redirectUris: ['not a url'] }),
+    expectedReason: UNPARSEABLE_REDIRECT_URI_REASON,
+    expectedRemediation: UNPARSEABLE_REDIRECT_URI_REMEDIATION,
   },
 ];
 
@@ -443,14 +474,140 @@ describe('lintOAuthClient', () => {
     const withoutWildcard = lintOAuthClient(client({ redirectUris: ['not a url'] }));
 
     expect(findingsForRule(withoutWildcard, 'OCS-001')).toStrictEqual([]);
-    expect(withoutWildcard.findings).toStrictEqual([]);
-    expect(withoutWildcard.status).toBe('pass');
+    expect(ruleIds(withoutWildcard)).toStrictEqual(['OCS-006']);
+    expect(onlyFindingForRule(withoutWildcard, 'OCS-006').status).toBe('warning');
+    expect(onlyFindingForRule(withoutWildcard, 'OCS-006').redirectUri).toBe('not a url');
+    expect(withoutWildcard.status).toBe('warning');
+    expect(lintOAuthClient(client({ redirectUris: ['not a url'] }))).toStrictEqual(withoutWildcard);
 
     const withWildcard = lintOAuthClient(client({ redirectUris: ['not a url/*'] }));
 
-    expect(ruleIds(withWildcard)).toStrictEqual(['OCS-002']);
+    expect(ruleIds(withWildcard)).toStrictEqual(['OCS-006', 'OCS-002']);
     expect(withWildcard.findings[0].redirectUri).toBe('not a url/*');
+    expect(withWildcard.findings[1].redirectUri).toBe('not a url/*');
     expect(withWildcard.status).toBe('fail');
+    expect(lintOAuthClient(client({ redirectUris: ['not a url/*'] }))).toStrictEqual(withWildcard);
+  });
+
+  test.each(unparseableRedirectUris)('warns that the registered value %s cannot be parsed as a URL', (redirectUri) => {
+    const result = lintOAuthClient(client({ redirectUris: [redirectUri] }));
+
+    expect(ruleIds(result)).toStrictEqual(['OCS-006']);
+    expect(result.findings[0].status).toBe('warning');
+    expect(result.findings[0].redirectUri).toBe(redirectUri);
+    expect(result.redirectUris).toStrictEqual([redirectUri]);
+    expect(result.status).toBe('warning');
+  });
+
+  test('warns rather than passes a bare origin whose host carries a right-to-left override', () => {
+    const spoofed = lintOAuthClient(client({ redirectUris: [BIDI_BARE_ORIGIN_URI] }));
+
+    expect(ruleIds(spoofed)).toStrictEqual(['OCS-006']);
+    expect(onlyFindingForRule(spoofed, 'OCS-006').status).toBe('warning');
+    expect(onlyFindingForRule(spoofed, 'OCS-006').redirectUri).toBe(BIDI_BARE_ORIGIN_URI);
+    expect(spoofed.status).toBe('warning');
+
+    const clean = lintOAuthClient(client({ redirectUris: [CLEAN_BARE_ORIGIN_URI] }));
+
+    expect(ruleIds(clean)).toStrictEqual(['OCS-001']);
+    expect(onlyFindingForRule(clean, 'OCS-001').status).toBe('warning');
+    expect(onlyFindingForRule(clean, 'OCS-001').redirectUri).toBe(CLEAN_BARE_ORIGIN_URI);
+    expect(clean.status).toBe('warning');
+  });
+
+  test('passes a redirect URI that parses even though its path carries a right-to-left override', () => {
+    const result = lintOAuthClient(client({ redirectUris: [BIDI_PATH_URI] }));
+
+    expect(result.redirectUris).toStrictEqual([BIDI_PATH_URI]);
+    expect(result.findings).toStrictEqual([]);
+    expect(result.status).toBe('pass');
+  });
+
+  test('warns without escalating an unparseable registration when prefix matching is enabled', () => {
+    const result = lintOAuthClient(client({ redirectUris: [BIDI_BARE_ORIGIN_URI] }), {
+      partialRedirectMatchEnabled: true,
+    });
+
+    expect(ruleIds(result)).toStrictEqual(['OCS-006']);
+    expect(onlyFindingForRule(result, 'OCS-006').status).toBe('warning');
+    expect(findingsForRule(result, 'OCS-003')).toStrictEqual([]);
+    expect(result.status).toBe('warning');
+  });
+
+  test('warns about a null redirect URI element without failing the client that carries it', () => {
+    const result = lintOAuthClient(client({ redirectUris: [EXACT_CALLBACK_URI, null] as unknown as string[] }));
+
+    expect(result.redirectUris).toStrictEqual([EXACT_CALLBACK_URI]);
+    expect(ruleIds(result)).toStrictEqual(['OCS-006']);
+
+    const finding = onlyFindingForRule(result, 'OCS-006');
+    expect(finding.status).toBe('warning');
+    expect(Object.keys(finding)).toStrictEqual(['ruleId', 'status', 'reason', 'remediation']);
+    expect(finding.reason).toBe(UNPARSEABLE_REDIRECT_URI_REASON);
+    expect(finding.remediation).toBe(UNPARSEABLE_REDIRECT_URI_REMEDIATION);
+    expect(result.status).toBe('warning');
+  });
+
+  test('warns rather than reporting no configured redirect URI for a client whose only element is null', () => {
+    const result = lintOAuthClient(client({ redirectUris: [null] as unknown as string[] }));
+
+    expect(result.redirectUris).toStrictEqual([]);
+    expect(ruleIds(result)).toStrictEqual(['OCS-006']);
+    expect(findingsForRule(result, 'OCS-005')).toStrictEqual([]);
+    expect(onlyFindingForRule(result, 'OCS-006').status).toBe('warning');
+    expect(Object.keys(onlyFindingForRule(result, 'OCS-006'))).toStrictEqual([
+      'ruleId',
+      'status',
+      'reason',
+      'remediation',
+    ]);
+    expect(result.status).toBe('warning');
+  });
+
+  test('emits one unparseable finding for a client carrying two null redirect URI elements', () => {
+    const result = lintOAuthClient(client({ redirectUris: [null, null] as unknown as string[] }));
+
+    expect(result.redirectUris).toStrictEqual([]);
+    expect(ruleIds(result)).toStrictEqual(['OCS-006']);
+    expect(onlyFindingForRule(result, 'OCS-006').status).toBe('warning');
+    expect(result.status).toBe('warning');
+  });
+
+  test.each(nonArrayRedirectUrisCases)(
+    'warns about a redirectUris field holding $name rather than a list',
+    (testCase) => {
+      const result = lintOAuthClient(client({ redirectUris: testCase.redirectUris as string[] }));
+
+      expect(result.redirectUris).toStrictEqual([]);
+      expect(ruleIds(result)).toStrictEqual(['OCS-006']);
+      expect(onlyFindingForRule(result, 'OCS-006').status).toBe('warning');
+      expect(Object.keys(onlyFindingForRule(result, 'OCS-006'))).toStrictEqual([
+        'ruleId',
+        'status',
+        'reason',
+        'remediation',
+      ]);
+      expect(result.status).toBe('warning');
+    }
+  );
+
+  test('returns the same result twice for a client carrying an unevaluable redirect URI and leaves it unchanged', () => {
+    const subject = client({
+      id: 'poisoned-client',
+      name: 'Poisoned Client',
+      redirectUris: [EXACT_CALLBACK_URI, null, BIDI_BARE_ORIGIN_URI] as unknown as string[],
+    });
+    const subjectBefore = structuredClone(subject);
+
+    const first = lintOAuthClient(subject);
+    const second = lintOAuthClient(subject);
+
+    expect(first.redirectUris).toStrictEqual([EXACT_CALLBACK_URI, BIDI_BARE_ORIGIN_URI]);
+    expect(ruleIds(first)).toStrictEqual(['OCS-006', 'OCS-006']);
+    expect(first.findings.map((finding) => finding.redirectUri)).toStrictEqual([undefined, BIDI_BARE_ORIGIN_URI]);
+    expect(first.status).toBe('warning');
+    expect(first).toStrictEqual(second);
+    expect(subject).toStrictEqual(subjectBefore);
   });
 
   test.each(copyCases)('states the reason and the suggested fix for $name', (testCase) => {
@@ -617,6 +774,7 @@ describe('lintOAuthClient', () => {
       'OCS-002',
       'OCS-003',
       'OCS-003',
+      'OCS-006',
       'OCS-002',
       'OCS-004',
     ]);

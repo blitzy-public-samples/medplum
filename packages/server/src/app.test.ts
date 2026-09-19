@@ -10,7 +10,7 @@ import { inviteUser } from './admin/invite';
 import { initApp, JSON_TYPE, shutdownApp } from './app';
 import { getConfig, loadTestConfig } from './config/loader';
 import { DatabaseMode, getDatabasePool } from './database';
-import { getProjectSystemRepo } from './fhir/repo';
+import { getProjectSystemRepo, Repository } from './fhir/repo';
 import { globalLogger } from './logger';
 import { generateAccessToken } from './oauth/keys';
 import { getRateLimitRedis } from './redis';
@@ -336,6 +336,35 @@ describe('App', () => {
       const logObj = JSON.parse(logLines[0][0]);
       // Request should be logged
       expect(logObj).toMatchObject({ method: 'GET', path: '/fhir/R4/Patient', status: 400 });
+    });
+
+    test('Authentication error from an unexpected exception carries no diagnostics', async () => {
+      const accessToken = await initTestAuth();
+
+      // Fail the membership read with a plain Error, which carries no presentable OperationOutcome
+      const readReferenceSpy = vi
+        .spyOn(Repository.prototype, 'readReference')
+        .mockRejectedValueOnce(new Error('internal detail that must not be echoed'));
+
+      try {
+        const res1 = await request(app)
+          .get(`/fhir/R4/Patient`)
+          .set('Authorization', 'Bearer ' + accessToken)
+          .set('Content-Type', ContentType.FHIR_JSON)
+          .send();
+        expect(res1).toHaveStatus(400);
+
+        const issue = (res1.body as OperationOutcome).issue[0];
+        expect(issue.details?.text).toStrictEqual('Authentication error');
+        expect(issue.diagnostics).toBeUndefined();
+      } finally {
+        readReferenceSpy.mockRestore();
+      }
+
+      // The exception is still recorded server-side for an operator
+      const errorLines = stdOutSpy.mock.calls.filter((call) => call[0].includes('"Authentication error"'));
+      expect(errorLines).toHaveLength(1);
+      expect(errorLines[0][0]).toContain('internal detail that must not be echoed');
     });
 
     test('Route parsing error', async () => {

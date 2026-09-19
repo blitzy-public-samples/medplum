@@ -31,6 +31,7 @@ import { HomePage } from './HomePage';
 import { AssaysPage } from './lab/AssaysPage';
 import { PanelsPage } from './lab/PanelsPage';
 import { MfaPage } from './MfaPage';
+import { NotFoundPage } from './NotFoundPage';
 import { OAuthPage } from './OAuthPage';
 import { RegisterPage } from './RegisterPage';
 import { ResetPasswordPage } from './ResetPasswordPage';
@@ -159,6 +160,7 @@ export function AppRoutes(): JSX.Element {
         </Route>
         <Route path="/:resourceType" element={<HomePage />} />
         <Route path="/" element={<HomePage />} />
+        <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes>
   );

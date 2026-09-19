@@ -68,6 +68,21 @@ const ALERT_COLORS = {
 
 const SEVERITY_TEXT_COLOR = 'black';
 
+const BIDI_CONTROL_PATTERN = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+
+/**
+ * Replaces every Unicode bidirectional control character of a string with a visible code point token.
+ * @param value - The text to render, as the security report carries it.
+ * @returns The same text with each bidirectional control replaced by its `<U+XXXX>` token, unchanged when it
+ * carries none.
+ */
+function escapeBidiControls(value: string): string {
+  return value.replace(
+    BIDI_CONTROL_PATTERN,
+    (control) => '<U+' + control.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0') + '>'
+  );
+}
+
 function isLintStatus(value: unknown): value is OAuthClientLintStatus {
   return value === 'pass' || value === 'warning' || value === 'fail';
 }
@@ -176,18 +191,18 @@ function FindingAlert({ finding }: { readonly finding: OAuthClientLintFinding })
     <Alert
       color={getStatusColor(ALERT_COLORS, finding.status)}
       c={SEVERITY_TEXT_COLOR}
-      title={finding.ruleId}
+      title={escapeBidiControls(finding.ruleId)}
       role="region"
       styles={FINDING_ALERT_STYLES}
     >
       {finding.redirectUri && (
         <Text size="sm" fw={500} style={FINDING_URI_STYLE}>
-          {finding.redirectUri}
+          {escapeBidiControls(finding.redirectUri)}
         </Text>
       )}
-      <Text size="sm">{finding.reason}</Text>
+      <Text size="sm">{escapeBidiControls(finding.reason)}</Text>
       <Text size="sm" mt="xs">
-        <strong>Suggested fix:</strong> {finding.remediation}
+        <strong>Suggested fix:</strong> {escapeBidiControls(finding.remediation)}
       </Text>
     </Alert>
   );
@@ -237,7 +252,7 @@ function OAuthClientSecurityDetail({ clientId }: { readonly clientId: string }):
     <>
       <Group justify="space-between" mb="md">
         <Title order={4} style={CLIENT_HEADING_STYLE}>
-          {result.name || result.id}
+          {escapeBidiControls(result.name || result.id)}
         </Title>
         <StatusBadge
           status={result.status}

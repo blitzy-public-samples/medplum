@@ -12,6 +12,7 @@ import { verifyJwt } from './keys';
 import {
   getAuthTokens,
   getClientApplication,
+  getLoginForAccessToken,
   getMembershipsForLogin,
   tryLogin,
   validateLoginRequest,
@@ -743,5 +744,17 @@ describe('OAuth utils', () => {
     const client = await getClientApplication('medplum-cli');
     expect(client).toBeDefined();
     expect(client.id).toStrictEqual('medplum-cli');
+  });
+
+  describe('getLoginForAccessToken', () => {
+    test.each([
+      ['three dot-separated segments that are not Base64URL JSON', 'not.a.jwt'],
+      ['an empty payload segment', 'x..y'],
+      ['a payload encoding JSON null', 'x.bnVsbA.y'],
+      ['a payload encoding a JSON number', 'x.MTIz.y'],
+      ['a payload encoding a JSON array', 'x.W10.y'],
+    ])('Resolves undefined for a token with %s', async (_description: string, accessToken: string) => {
+      await expect(getLoginForAccessToken(undefined, accessToken)).resolves.toBeUndefined();
+    });
   });
 });

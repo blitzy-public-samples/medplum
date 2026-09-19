@@ -180,7 +180,9 @@ export async function attachRequestContext(req: Request, res: Response, next: Ne
     requestContextStore.run(ctx, () => {
       getLogger().error('Authentication error', { err: err.toString(), stack: err.stack });
       const outcome = badRequest('Authentication error');
-      outcome.issue[0].diagnostics = err.toString();
+      if (err instanceof OperationOutcomeError) {
+        outcome.issue[0].diagnostics = err.toString();
+      }
       const wrappedErr = new OperationOutcomeError(outcome, { cause: err });
       next(wrappedErr);
     });

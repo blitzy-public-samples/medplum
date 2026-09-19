@@ -18,6 +18,7 @@ export const OAuthClientLintRule = {
   PrefixMatchingEnabled: 'OCS-003',
   RegistrationDiscoverable: 'OCS-004',
   NoRedirectUri: 'OCS-005',
+  UnparseableRedirectUri: 'OCS-006',
 } as const;
 
 /**
@@ -31,7 +32,10 @@ export type OAuthClientLintRuleId = (typeof OAuthClientLintRule)[keyof typeof OA
 export interface OAuthClientLintFinding {
   readonly ruleId: OAuthClientLintRuleId;
   readonly status: OAuthClientLintStatus;
-  /** The registered redirect URI that triggered the finding. Absent when the finding is not scoped to a URI. */
+  /**
+   * The registered redirect URI that triggered the finding. Absent when the finding is not scoped to a URI, and when
+   * the registered entry that triggered it is not stored as a string.
+   */
   readonly redirectUri?: string;
   readonly reason: string;
   readonly remediation: string;
@@ -43,7 +47,7 @@ export interface OAuthClientLintFinding {
 export interface OAuthClientLintResult {
   readonly id: string;
   readonly name?: string;
-  /** Every registered redirect URI, in registration order. */
+  /** Every registered redirect URI stored as a string, in registration order. */
   readonly redirectUris: string[];
   /** The highest severity among `findings`, or `pass` when there are none. */
   readonly status: OAuthClientLintStatus;
@@ -98,6 +102,12 @@ const LINT_COPY: Record<Exclude<OAuthClientLintRuleId, 'OCS-004'>, OAuthClientLi
       'No redirect URI is configured, so this client cannot take part in a redirect-based authorization flow and no redirect risk applies.',
     remediation: 'None required.',
   },
+  'OCS-006': {
+    reason:
+      'This registered redirect URI value cannot be parsed as an absolute URL, so the redirect URI checks could not be applied to it and this client is reported as unevaluated rather than clean. A value a URL parser rejects is still stored, is still compared against an incoming authorization request as an exact string, and can carry invisible characters that make it read as a different address than the one registered.',
+    remediation:
+      'Inspect the stored value directly rather than the text shown here, then remove the entry or replace it with one exact, fully qualified callback URL — for example https://app.example.com/oauth/callback.',
+  },
 };
 
 const REGISTRATION_DISCOVERABLE_COPY: Record<RegistrationDiscoverableClient['source'], OAuthClientLintCopy> = {
@@ -132,11 +142,38 @@ function parseRedirectUri(uri: string): URL | undefined {
 }
 
 /**
- * Reduces a registered redirect URI list to the values the URI-scoped rules are evaluated against.
- * @param redirectUris - The registered redirect URIs, in registration order.
- * @returns The distinct redirect URIs, each in the position of its first occurrence.
+ * One registered entry standing for a `redirectUris` field that is stored as something other than a list, which no
+ * URI-scoped rule can evaluate and which carries no registered value of its own.
  */
-function distinctRedirectUris(redirectUris: string[]): string[] {
+const MALFORMED_REDIRECT_URIS_FIELD = Symbol('malformedRedirectUrisField');
+
+/**
+ * Collects the registered redirect URI entries of a client application as they are stored, without assuming that
+ * every entry is a string or that `redirectUris` holds a list.
+ * @param client - The client application to read, including the deprecated singular `redirectUri` field.
+ * @returns The registered entries in registration order: the deprecated singular `redirectUri` first, then either the
+ * `redirectUris` members or, when that field is not stored as a list, the single
+ * {@link MALFORMED_REDIRECT_URIS_FIELD} entry.
+ */
+function getRegisteredRedirectUriEntries(client: ClientApplication): unknown[] {
+  const registered: unknown = client.redirectUris;
+  if (registered && !Array.isArray(registered)) {
+    const entries: unknown[] = [];
+    if (client.redirectUri) {
+      entries.push(client.redirectUri);
+    }
+    entries.push(MALFORMED_REDIRECT_URIS_FIELD);
+    return entries;
+  }
+  return getClientRedirectUris(client);
+}
+
+/**
+ * Reduces a registered redirect URI list to the values the URI-scoped rules are evaluated against.
+ * @param redirectUris - The registered redirect URI entries, in registration order.
+ * @returns The distinct entries, each in the position of its first occurrence.
+ */
+function distinctRedirectUris<T>(redirectUris: readonly T[]): T[] {
   return Array.from(new Set(redirectUris));
 }
 
@@ -225,23 +262,34 @@ function aggregateStatus(findings: readonly OAuthClientLintFinding[]): OAuthClie
  * @param client - The client application to evaluate, including the deprecated singular `redirectUri` field.
  * @param options - Evaluation inputs supplied by the caller. Both members are optional; an absent member disables the
  * rules that depend on it.
- * @returns The client identity fields, every registered redirect URI in registration order including any repeated
- * entry, every finding in deterministic emission order — exactly one per matching rule and distinct redirect URI pair
- * for the URI-scoped rules, in first occurrence order of the URI, followed by the at most two client-level findings —
- * and the aggregate status.
+ * @returns The client identity fields, every registered redirect URI stored as a string in registration order
+ * including any repeated entry, every finding in deterministic emission order — exactly one per matching rule and
+ * distinct registered entry pair for the URI-scoped rules, in first occurrence order of the entry, followed by the at
+ * most two client-level findings — and the aggregate status. A registered entry that is not a string, or that is a
+ * string no absolute URL can be parsed from, carries an `OCS-006` finding instead of the rules that need a parsed URL.
  */
 export function lintOAuthClient(
   client: WithId<ClientApplication>,
   options?: OAuthClientLintOptions
 ): OAuthClientLintResult {
-  const redirectUris = getClientRedirectUris(client);
-  const evaluatedRedirectUris = distinctRedirectUris(redirectUris);
+  const registeredEntries = getRegisteredRedirectUriEntries(client);
+  const redirectUris = registeredEntries.filter((entry): entry is string => typeof entry === 'string');
   const partialRedirectMatchEnabled = options?.partialRedirectMatchEnabled === true;
   const findings: OAuthClientLintFinding[] = [];
 
-  for (const redirectUri of evaluatedRedirectUris) {
-    const url = parseRedirectUri(redirectUri);
-    if (url !== undefined && isBareOrigin(url)) {
+  for (const entry of distinctRedirectUris(registeredEntries)) {
+    const redirectUri = typeof entry === 'string' ? entry : undefined;
+    const url = redirectUri === undefined ? undefined : parseRedirectUri(redirectUri);
+    if (url === undefined) {
+      findings.push(
+        createFinding(
+          OAuthClientLintRule.UnparseableRedirectUri,
+          'warning',
+          LINT_COPY[OAuthClientLintRule.UnparseableRedirectUri],
+          redirectUri
+        )
+      );
+    } else if (isBareOrigin(url)) {
       findings.push(
         createFinding(
           OAuthClientLintRule.BareOrigin,
@@ -251,7 +299,7 @@ export function lintOAuthClient(
         )
       );
     }
-    if (redirectUri.includes('*')) {
+    if (redirectUri?.includes('*')) {
       findings.push(
         createFinding(OAuthClientLintRule.Wildcard, 'fail', LINT_COPY[OAuthClientLintRule.Wildcard], redirectUri)
       );
@@ -270,13 +318,17 @@ export function lintOAuthClient(
 
   const registrationDiscoverableClients = options?.registrationDiscoverableClients;
   if (registrationDiscoverableClients !== undefined) {
-    const finding = lintRegistrationDiscoverable(client.id, evaluatedRedirectUris, registrationDiscoverableClients);
+    const finding = lintRegistrationDiscoverable(
+      client.id,
+      distinctRedirectUris(redirectUris),
+      registrationDiscoverableClients
+    );
     if (finding !== undefined) {
       findings.push(finding);
     }
   }
 
-  if (redirectUris.length === 0) {
+  if (registeredEntries.length === 0) {
     findings.push(
       createFinding(OAuthClientLintRule.NoRedirectUri, 'pass', LINT_COPY[OAuthClientLintRule.NoRedirectUri])
     );

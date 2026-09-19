@@ -104,6 +104,35 @@ describe('App', () => {
 
     expect(navigateMock).toHaveBeenCalledWith('/test-code');
   });
+
+  test('Unmatched URL below a declared route renders not found', async () => {
+    const user = await setup('/admin/oauth-security/aaa/bbb');
+
+    expect(screen.getByText('Page not found')).toBeInTheDocument();
+    expect(screen.getByText('The page you requested does not exist.')).toBeInTheDocument();
+
+    await user.click(screen.getByText('Go to the home page'));
+    expect(navigateMock).toHaveBeenCalledWith('/');
+  });
+
+  test('Unmatched URL with a markup payload renders not found without reflecting it', async () => {
+    await setup('/admin/oauth-security/<script>window.__xss=6</script>');
+
+    expect(screen.getByText('Page not found')).toBeInTheDocument();
+    expect(screen.queryByText(/window\.__xss/)).not.toBeInTheDocument();
+  });
+
+  test('Unmatched top level URL renders not found', async () => {
+    await setup('/nonexistent/deep/url/here');
+
+    expect(screen.getByText('Page not found')).toBeInTheDocument();
+  });
+
+  test('Declared route does not render not found', async () => {
+    await setup('/');
+
+    expect(screen.queryByText('Page not found')).not.toBeInTheDocument();
+  });
 });
 
 function isNavOpen(): boolean {

@@ -34,6 +34,15 @@ const SECOND_EXACT_CALLBACK_URI = 'https://app.example.com/other/callback';
 const BARE_ORIGIN_URI = 'https://app.example.com';
 const WILDCARD_URI = 'https://app.example.com/*';
 
+/** The callback URL a non-admin project member registers beside an empty second entry. */
+const MEMBER_CALLBACK_URI = 'https://member.example.com/cb';
+
+/** A bare origin whose host carries a right-to-left override, which `new URL()` rejects. */
+const BIDI_BARE_ORIGIN_URI = 'https://\u202Emoc.live\u202C.example.com';
+
+/** The clean equivalent of {@link BIDI_BARE_ORIGIN_URI}, which parses and is a bare origin. */
+const CLEAN_BARE_ORIGIN_URI = 'https://victim.example.com';
+
 const DANGEROUS_REDIRECT_SETTING = 'allow-dangerous-redirect';
 
 const CONFIG_SOURCE_REASON = 'configured default OAuth client list';
@@ -1364,6 +1373,99 @@ describe('OAuth client security endpoint', () => {
       expect(refusedOffsets).toHaveLength(1);
       expect(seen).toHaveLength(new Set(seen).size);
       expect(seen.sort((a, b) => a.localeCompare(b))).toStrictEqual(projectClientIds);
+    });
+  });
+
+  describe('Unevaluable redirect URI configuration', () => {
+    let unevaluableProjectId: string;
+    let unevaluableAccessToken: string;
+    let poisonedClientId: string;
+    let poisonedStoredRedirectUris: unknown;
+    let healthyClientId: string;
+    let spoofedClientId: string;
+    let cleanClientId: string;
+
+    beforeAll(async () => {
+      const unevaluable = await createTestProject({
+        project: { strictMode: false },
+        membership: { admin: true },
+        withAccessToken: true,
+        withRepo: true,
+      });
+      unevaluableProjectId = unevaluable.project.id;
+      unevaluableAccessToken = unevaluable.accessToken;
+
+      const member = await addTestUser(unevaluable.project);
+      const poisoned = await seedClient(
+        member.accessToken,
+        clientFixture('PoisonedClient' + randomUUID(), [MEMBER_CALLBACK_URI, ''])
+      );
+      const healthy = await seedClient(
+        member.accessToken,
+        clientFixture('HealthyClient' + randomUUID(), [BARE_ORIGIN_URI])
+      );
+      const spoofed = await seedClient(
+        member.accessToken,
+        clientFixture('SpoofedOriginClient' + randomUUID(), [BIDI_BARE_ORIGIN_URI])
+      );
+      const clean = await seedClient(
+        member.accessToken,
+        clientFixture('CleanOriginClient' + randomUUID(), [CLEAN_BARE_ORIGIN_URI])
+      );
+
+      poisonedClientId = poisoned.id;
+      poisonedStoredRedirectUris = poisoned.redirectUris;
+      healthyClientId = healthy.id;
+      spoofedClientId = spoofed.id;
+      cleanClientId = clean.id;
+    });
+
+    test('Non-admin member stores a null redirect URI element in a project without strict validation', () => {
+      expect(poisonedStoredRedirectUris).toStrictEqual([MEMBER_CALLBACK_URI, null]);
+    });
+
+    test('Report of the whole project covers a client whose redirect URI list holds a null element', async () => {
+      const res = await readReport(unevaluableProjectId, unevaluableAccessToken);
+      expect(res).toHaveStatus(200);
+
+      const report = reportOf(res);
+      const poisonedResult = resultById(report, poisonedClientId);
+      expect(ruleIdsOf(poisonedResult)).toStrictEqual(['OCS-006']);
+      expect(poisonedResult.status).toStrictEqual('warning');
+      expect(poisonedResult.redirectUris).toStrictEqual([MEMBER_CALLBACK_URI]);
+
+      const [finding] = findingsOf(poisonedResult, 'OCS-006');
+      expect(finding.status).toStrictEqual('warning');
+      expect(finding.redirectUri).toBeUndefined();
+      expect(finding.reason.length).toBeGreaterThan(0);
+      expect(finding.remediation.length).toBeGreaterThan(0);
+
+      const healthyResult = resultById(report, healthyClientId);
+      expect(ruleIdsOf(healthyResult)).toStrictEqual(['OCS-001']);
+      expect(healthyResult.status).toStrictEqual('warning');
+      expect(healthyResult.redirectUris).toStrictEqual([BARE_ORIGIN_URI]);
+      expect(report.returned).toStrictEqual(report.results.length);
+    });
+
+    test('Report warns about a bare origin whose host carries a right-to-left override', async () => {
+      const res = await readReport(
+        unevaluableProjectId,
+        unevaluableAccessToken,
+        '?_id=' + [spoofedClientId, cleanClientId].join(',')
+      );
+      expect(res).toHaveStatus(200);
+
+      const report = reportOf(res);
+      const spoofedResult = resultById(report, spoofedClientId);
+      expect(ruleIdsOf(spoofedResult)).toStrictEqual(['OCS-006']);
+      expect(spoofedResult.status).toStrictEqual('warning');
+      expect(spoofedResult.redirectUris).toStrictEqual([BIDI_BARE_ORIGIN_URI]);
+      expect(findingsOf(spoofedResult, 'OCS-006')[0].redirectUri).toStrictEqual(BIDI_BARE_ORIGIN_URI);
+
+      const cleanResult = resultById(report, cleanClientId);
+      expect(ruleIdsOf(cleanResult)).toStrictEqual(['OCS-001']);
+      expect(cleanResult.status).toStrictEqual('warning');
+      expect(findingsOf(cleanResult, 'OCS-001')[0].redirectUri).toStrictEqual(CLEAN_BARE_ORIGIN_URI);
     });
   });
 
